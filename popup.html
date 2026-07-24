@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      width: 280px;
+      margin: 0;
+      padding: 14px 16px;
+      font-family: Roboto, Arial, sans-serif;
+      font-size: 13px;
+      background: #1f1f1f;
+      color: #eee;
+    }
+    h1 {
+      font-size: 14px;
+      margin: 0 0 12px;
+      font-weight: 500;
+    }
+    .row { margin-bottom: 14px; }
+    .row:last-child { margin-bottom: 0; }
+    label { display: block; margin-bottom: 6px; }
+    .value { color: #f55; font-weight: 500; }
+    input[type="range"] { width: 100%; accent-color: #f00; }
+    input[type="checkbox"] { accent-color: #f00; vertical-align: middle; margin-right: 6px; }
+    .hint { color: #999; font-size: 11px; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <h1>YouTube Exponential Volume</h1>
+
+  <div class="row">
+    <label>
+      <input type="checkbox" id="enabled">
+      Экспоненциальная громкость
+    </label>
+    <div class="hint">Выкл. — стандартная линейная шкала YouTube.</div>
+  </div>
+
+  <div class="row">
+    <label>Крутизна кривой (γ): <span class="value" id="gammaValue"></span></label>
+    <input type="range" id="gamma" min="1" max="5" step="0.1">
+    <div class="hint">Громкость на выходе = позиция^γ. 1 — линейно, 3 — рекомендуется, больше — точнее внизу шкалы.</div>
+  </div>
+
+  <div class="row">
+    <label>Длина ползунка: <span class="value" id="widthValue"></span> px</label>
+    <input type="range" id="sliderWidth" min="120" max="400" step="10">
+    <div class="hint">Шаг ползунка — 0.1%. Колесо мыши: ±1%, с Shift: ±0.1%.</div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
