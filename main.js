@@ -106,13 +106,20 @@
     }
     /* содержимое поверх слоя подсветки */
     .ytev-box > * { position: relative; z-index: 1; }
-    /* подсветка при наведении — скруглённый слой с отступом от рамки,
-       как у штатных элементов YouTube; на раскладку не влияет */
+    /* кнопка mute — большая «зона нажатия» выше видимой плашки; внутри
+       рамки ужимаем её до высоты рамки, иконка (размеры в %) следует сама */
+    .ytev-box .ytp-mute-button {
+      height: 100% !important;
+      min-height: 0 !important;
+      box-sizing: border-box !important;
+    }
+    /* подсветка при наведении — скруглённый слой с отступом только по
+       бокам, как у штатных элементов YouTube; на раскладку не влияет */
     .ytev-box.ytev-framed::after {
       content: '';
       position: absolute;
-      inset: var(--ytev-hl-inset, 4px);
-      border-radius: var(--ytev-hl-radius, 18px);
+      inset: 0 var(--ytev-hl-inset, 4px);
+      border-radius: inherit;
       background: rgba(255, 255, 255, .12);
       opacity: 0;
       transition: opacity .1s;
@@ -283,68 +290,76 @@
     player.classList.add('ytev-fallback');
   }
 
-  // Свою рамку рисуем сами, копируя оформление соседней «пилюли» с
-  // кнопками: ширина штатной управляется скриптами YouTube под её
-  // собственное содержимое, поэтому вставлять ползунок внутрь неё нельзя —
-  // он вылезает за фон. Копирование с живого элемента даёт точное
-  // совпадение в любой версии интерфейса и теме; в старом интерфейсе фон
-  // прозрачный — прозрачным станет и наш блок.
+  const isTransparentBg = (bg) =>
+    !bg || bg === 'transparent' || /rgba\([^)]*,\s*0\s*\)$/.test(bg);
+
+  // Элемент, который реально рисует фон «плашки»: у обёрток (например,
+  // .ytp-time-display) фон часто прозрачный, а видимая плашка — на
+  // вложенном элементе. Обходим поддерево и берём первый элемент с
+  // непрозрачным фоном правдоподобной для плашки высоты.
+  function findSurface(root) {
+    if (!root || !root.isConnected) return null;
+    const queue = [root];
+    while (queue.length) {
+      const el = queue.shift();
+      if (el === ui.box || ui.box.contains(el)) continue;
+      const s = getComputedStyle(el);
+      if (s.display === 'none') continue;
+      if (!isTransparentBg(s.backgroundColor)) {
+        const h = el.getBoundingClientRect().height;
+        if (h >= 24 && h <= 80) return { el, style: s };
+        continue; // фоновые мелочи (переключатели) и растянутые обёртки
+      }
+      for (const c of el.children) queue.push(c);
+    }
+    return null;
+  }
+
+  // Свою рамку рисуем сами, копируя оформление с реально видимой плашки
+  // той же строки (время, правые кнопки, пилюля-донор): ширина штатной
+  // «пилюли» управляется скриптами YouTube под её собственное содержимое,
+  // поэтому вставлять ползунок внутрь неё нельзя — он вылезает за фон.
+  // Копирование с живого элемента даёт точное совпадение размеров и
+  // оформления в любой версии интерфейса и теме; в старом интерфейсе
+  // фоновых плашек нет — блок остаётся прозрачным.
   function syncFrameStyle() {
-    const pill = findPill();
-    if (resizeObserver && pill && pill !== observedPill) {
-      resizeObserver.observe(pill); // рамка меняет высоту в big-mode
-      observedPill = pill;
+    const player = getPlayer();
+    let surface = null;
+    const candidates = [
+      player && player.querySelector('.ytp-time-display'),
+      player && player.querySelector('.ytp-right-controls'),
+      findPill(),
+    ];
+    for (const cand of candidates) {
+      surface = findSurface(cand);
+      if (surface) break;
+    }
+    if (resizeObserver && surface && surface.el !== observedPill) {
+      resizeObserver.observe(surface.el); // плашка меняет высоту в big-mode
+      observedPill = surface.el;
     }
     const st = ui.box.style;
-    const s = pill && getComputedStyle(pill);
-    const bg = s && s.backgroundColor;
-    const transparent =
-      !bg || bg === 'transparent' || /rgba\([^)]*,\s*0\s*\)$/.test(bg);
-    ui.box.classList.toggle('ytev-framed', !transparent);
-    if (transparent) {
+    ui.box.classList.toggle('ytev-framed', !!surface);
+    if (!surface) {
       st.background = '';
       st.borderRadius = '';
       st.height = '';
       st.padding = '';
       st.backdropFilter = '';
       st.removeProperty('--ytev-hl-inset');
-      st.removeProperty('--ytev-hl-radius');
       return;
     }
-    st.background = bg;
+    const s = surface.style;
+    const h = Math.round(surface.el.getBoundingClientRect().height);
+    st.background = s.backgroundColor;
     st.borderRadius = s.borderRadius;
-    // Высоту рамке не назначаем, когда внутри живёт родная кнопка mute:
-    // кнопка и задаёт высоту — ровно ту же, что у соседних пилюль,
-    // которые YouTube обтягивает вокруг таких же кнопок. Только если
-    // кнопку забрать не удалось, копируем высоту с пилюли или соседей.
-    const muteInBox = ui.mute && ui.box.contains(ui.mute);
-    if (muteInBox) {
-      st.height = '';
-    } else {
-      let h = Math.round(pill.getBoundingClientRect().height);
-      if (!h) {
-        const player = getPlayer();
-        for (const sel of ['.ytp-time-display', '.ytp-right-controls']) {
-          const ref = player && player.querySelector(sel);
-          const hh = ref ? Math.round(ref.getBoundingClientRect().height) : 0;
-          if (hh) {
-            h = hh;
-            break;
-          }
-        }
-      }
-      st.height = h ? h + 'px' : '';
-    }
-    // отступы рамки и параметры слоя подсветки масштабируются от
-    // фактической высоты; слева кнопка несёт собственные поля — меньше
-    const bh = Math.round(ui.box.getBoundingClientRect().height) || 40;
-    const padR = Math.round(bh * 0.3);
-    const padL = muteInBox ? Math.round(padR * 0.4) : padR;
+    st.height = h + 'px';
+    // отступы рамки — только по бокам, пропорциональны высоте; слева
+    // кнопка mute несёт собственные поля, поэтому отступ меньше
+    const padR = Math.round(h * 0.3);
+    const padL = ui.mute && ui.box.contains(ui.mute) ? Math.round(padR * 0.4) : padR;
     st.padding = '0 ' + padR + 'px 0 ' + padL + 'px';
-    const inset = Math.max(3, Math.round(bh * 0.09));
-    const radius = parseFloat(s.borderRadius) || bh / 2;
-    st.setProperty('--ytev-hl-inset', inset + 'px');
-    st.setProperty('--ytev-hl-radius', Math.max(4, Math.round(radius - inset)) + 'px');
+    st.setProperty('--ytev-hl-inset', Math.max(3, Math.round(h * 0.09)) + 'px');
     st.backdropFilter = s.backdropFilter && s.backdropFilter !== 'none' ? s.backdropFilter : '';
   }
 
