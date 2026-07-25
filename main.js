@@ -81,8 +81,14 @@
 
   const style = document.createElement('style');
   style.textContent = `
-    /* штатный ползунок скрыт, но возвращается, если для нашего нет места */
-    #movie_player:not(.ytev-fallback) .ytp-volume-panel { display: none !important; }
+    /* штатные ползунок и кнопка звука скрыты (кнопку рисуем свою — у
+       родной значок позиционируется внутренней раскладкой YouTube и при
+       любом изменении размеров кнопки уезжает); в режиме отката всё
+       штатное возвращается */
+    #movie_player:not(.ytev-fallback) .ytp-volume-panel,
+    #movie_player:not(.ytev-fallback) .ytp-mute-button {
+      display: none !important;
+    }
     /* при наведении YouTube резервирует ширину под выезжающий штатный
        ползунок — он скрыт, поэтому рамка раздувалась бы впустую; пока
        работает наш ползунок, запрещаем области громкости менять ширину */
@@ -106,41 +112,39 @@
     }
     /* содержимое поверх слоя подсветки */
     .ytev-box > * { position: relative; z-index: 1; }
-    /* геометрия рамки: отступ --ytev-pad одинаков со всех сторон.
-       Кнопка mute (у YouTube это большая «зона нажатия» с внутренними
-       полями под другой размер) ужимается до квадрата высотой
-       «рамка минус два отступа» и принудительно центрируется — иконка
-       в кнопках YouTube задана в процентах и следует за размером */
+    /* геометрия рамки: отступ --ytev-pad одинаков со всех сторон —
+       сверху/снизу его даёт центровка содержимого высотой
+       «рамка минус два отступа», слева/справа — боковые поля */
     .ytev-box.ytev-framed {
       padding: 0 var(--ytev-pad, 10px);
       gap: calc(var(--ytev-pad, 10px) * .8);
     }
     .ytev-box:not(.ytev-framed) { gap: 6px; }
-    .ytev-box.ytev-framed .ytp-mute-button {
-      height: calc(100% - 2 * var(--ytev-pad, 10px)) !important;
-      width: auto !important;
-      aspect-ratio: 1 / 1 !important;
-      min-height: 0 !important;
-      min-width: 0 !important;
-      padding: 0 !important;
-      margin: 0 !important;
-      display: inline-flex !important;
-      align-items: center !important;
-      justify-content: center !important;
-      box-sizing: border-box !important;
-      overflow: visible;
+    /* своя кнопка звука: квадрат точно по содержимому, значок — наш SVG,
+       поэтому центр и размер полностью предсказуемы */
+    .ytev-mute {
+      flex: none;
+      height: calc(100% - 2 * var(--ytev-pad, 10px));
+      aspect-ratio: 1 / 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: none;
+      border: none;
+      padding: 0;
+      margin: 0;
+      color: #fff;
+      cursor: pointer;
     }
-    /* сам значок YouTube размещает внутри кнопки собственной раскладкой
-       (абсолютные позиции/поля под другой размер) — принудительно
-       растягиваем прямых потомков на кнопку, чтобы значок был по центру */
-    .ytev-box.ytev-framed .ytp-mute-button > * {
-      position: static !important;
-      width: 100% !important;
-      height: 100% !important;
-      margin: 0 !important;
-      padding: 0 !important;
-      box-sizing: border-box !important;
-    }
+    .ytev-box:not(.ytev-framed) .ytev-mute { height: 24px; }
+    .ytev-mute svg { width: 100%; height: 100%; display: block; }
+    /* состояния значка: тихо — без волн, до 50% — одна волна, громче —
+       две, выключен — перечёркнут */
+    .ytev-i-w1, .ytev-i-w2, .ytev-i-off { display: none; }
+    .ytev-box[data-vol="low"] .ytev-i-w1 { display: inline; }
+    .ytev-box[data-vol="high"] .ytev-i-w1,
+    .ytev-box[data-vol="high"] .ytev-i-w2 { display: inline; }
+    .ytev-box[data-vol="muted"] .ytev-i-off { display: inline; }
     /* подсветка при наведении — скруглённый слой с отступом только по
        бокам, как у штатных элементов YouTube; на раскладку не влияет */
     .ytev-box.ytev-framed::after {
@@ -199,7 +203,7 @@
   const MIN_SLIDER = 48; // короче — бесполезно, лучше спрятать
   const SAFETY_GAP = 16; // запас, чтобы панель не «поехала»
 
-  // { box, slider, label, mute, muteHome, muteRef, hiddenPill }
+  // { box, slider, label, muteBtn, hiddenPill }
   let ui = null;
   let boundVideo = null;
   let observedPlayer = null;
@@ -226,7 +230,12 @@
     ui.slider.value = pct;
     paint(pct);
     ui.label.textContent = fmt(pct);
-    ui.box.classList.toggle('ytev-muted', video.muted || pct === 0);
+    const muted = video.muted || pct === 0;
+    ui.box.classList.toggle('ytev-muted', muted);
+    ui.box.dataset.vol = muted ? 'muted' : pct < 50 ? 'low' : 'high';
+    if (ui.muteBtn) {
+      ui.muteBtn.title = muted ? 'Включить звук (m)' : 'Отключить звук (m)';
+    }
     const real = toReal(pct / 100) * 100;
     ui.slider.title = SETTINGS.enabled
       ? `Громкость: ${fmt(pct)} (на выходе ≈ ${fmt(real)})`
@@ -247,70 +256,49 @@
   };
 
   // «Пилюля» со штатными кнопками — элемент, рядом с которым мы вставлены
-  // и в котором изначально жила кнопка звука (сама кнопка теперь может
-  // находиться внутри нашего блока)
+  // и в котором живёт (скрытая) штатная кнопка звука
   function findPill() {
     const controls = ui.box.parentElement;
     if (!controls) return null;
     let el =
       (ui.hiddenPill && ui.hiddenPill.isConnected ? ui.hiddenPill : null) ||
-      (ui.muteHome && ui.muteHome.isConnected ? ui.muteHome : null) ||
       controls.querySelector('.ytp-volume-area, .ytp-mute-button');
     if (!el || ui.box.contains(el)) return null;
     while (el && el.parentElement !== controls) el = el.parentElement;
     return el && el !== ui.box ? el : null;
   }
 
-  // Переносим штатную кнопку mute внутрь нашего блока — ползунок и кнопка
-  // оказываются в одной рамке. Слушатели YouTube при перемещении узла
-  // сохраняются. Если после переноса в «пилюле» не осталось видимых
-  // кнопок, прячем её целиком (иначе висел бы пустой кружок фона).
-  function adoptMute(controls) {
+  // Штатная кнопка звука скрыта через CSS; если кроме неё в «пилюле» не
+  // осталось видимых кнопок — прячем пилюлю целиком, иначе висел бы
+  // пустой кружок фона. В режиме отката пилюля возвращается.
+  function markDonorPill(controls) {
+    ui.hiddenPill = null;
     const mute = controls.querySelector('.ytp-mute-button');
     if (!mute || ui.box.contains(mute)) return;
-    ui.mute = mute;
-    ui.muteHome = mute.parentElement;
-    ui.muteRef = mute.nextElementSibling;
-    ui.box.prepend(mute);
-    ui.hiddenPill = null;
-    let pill = ui.muteHome;
+    let pill = mute.parentElement;
     while (pill && pill.parentElement !== controls) pill = pill.parentElement;
-    if (pill && pill !== ui.box) {
-      const hasVisible = [...pill.querySelectorAll('button, [role="button"]')]
-        .some((b) => b.offsetWidth > 0);
-      if (!hasVisible) {
-        ui.hiddenPill = pill;
-        pill.style.display = 'none';
-      }
+    if (!pill || pill === ui.box) return;
+    const hasOther = [...pill.querySelectorAll('button, [role="button"]')]
+      .some((b) => b !== mute && b.offsetWidth > 0);
+    if (!hasOther) {
+      ui.hiddenPill = pill;
+      pill.style.display = 'none';
     }
   }
 
-  // Нормальный режим: кнопка в нашем блоке, пустая пилюля спрятана
+  // Нормальный режим: наш блок виден, опустевшая пилюля спрятана
   function enterNormal(player) {
     player.classList.remove('ytev-fallback');
-    if (ui.mute && ui.mute.isConnected && ui.mute.parentElement !== ui.box) {
-      ui.box.prepend(ui.mute);
-    }
     if (ui.hiddenPill && ui.hiddenPill.isConnected) {
       ui.hiddenPill.style.display = 'none';
     }
     ui.box.style.display = '';
   }
 
-  // Откат (узкий плеер): наш блок спрятан, кнопка возвращается на родное
-  // место рядом со штатным ползунком, пилюля снова видима
+  // Откат (узкий плеер): наш блок спрятан, штатные кнопка и ползунок
+  // возвращаются (класс ytev-fallback снимает CSS-скрытие)
   function enterFallback(player) {
     ui.box.style.display = 'none';
-    if (
-      ui.mute &&
-      ui.muteHome &&
-      ui.muteHome.isConnected &&
-      ui.mute.parentElement === ui.box
-    ) {
-      const ref =
-        ui.muteRef && ui.muteRef.parentElement === ui.muteHome ? ui.muteRef : null;
-      ui.muteHome.insertBefore(ui.mute, ref);
-    }
     if (ui.hiddenPill && ui.hiddenPill.isConnected) {
       ui.hiddenPill.style.display = '';
     }
@@ -514,14 +502,14 @@
     if (!controls) return;
     observePlayer();
     if (ui && controls.contains(ui.box)) {
-      if (!ui.mute || !ui.mute.isConnected) adoptMute(controls);
+      if (ui.hiddenPill && !ui.hiddenPill.isConnected) markDonorPill(controls);
       bindVideo();
       layout();
       return;
     }
 
     // блоки, оставшиеся от прежней загрузки расширения (после обновления);
-    // живую кнопку mute из такого блока возвращаем в панель, не удаляем
+    // живую штатную кнопку из такого блока возвращаем в панель, не удаляем
     for (const stale of document.querySelectorAll('.ytev-box')) {
       if (ui && stale === ui.box) continue;
       const orphanMute = stale.querySelector('.ytp-mute-button');
@@ -531,6 +519,29 @@
 
     const box = document.createElement('div');
     box.className = 'ytev-box';
+
+    // своя кнопка звука: значок предсказуемо центрирован при любом размере
+    const muteBtn = document.createElement('button');
+    muteBtn.className = 'ytev-mute';
+    muteBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+      '<path d="M3 9v6h4l5 5V4L7 9H3z"/>' +
+      '<path class="ytev-i-w1" d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>' +
+      '<path class="ytev-i-w2" d="M14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>' +
+      '<path class="ytev-i-off" d="M4.27 3 3 4.27l16.73 16.73L21 19.73z"/>' +
+      '</svg>';
+    muteBtn.addEventListener('click', () => {
+      const player = getPlayer();
+      const video = getVideo();
+      if (!video) return;
+      if (video.muted || video.volume === 0) {
+        if (player && typeof player.unMute === 'function') player.unMute();
+        video.muted = false;
+      } else {
+        if (player && typeof player.mute === 'function') player.mute();
+        else video.muted = true;
+      }
+    });
 
     const slider = document.createElement('input');
     slider.type = 'range';
@@ -542,7 +553,7 @@
     const label = document.createElement('span');
     label.className = 'ytev-label';
 
-    box.append(slider, label);
+    box.append(muteBtn, slider, label);
 
     // встаём после «пилюли» с кнопками, а не внутрь неё: YouTube управляет
     // её шириной из скриптов под собственное содержимое, и вставленный
@@ -569,8 +580,8 @@
       { passive: false }
     );
 
-    ui = { box, slider, label };
-    adoptMute(controls);
+    ui = { box, slider, label, muteBtn };
+    markDonorPill(controls);
     observeChain();
     bindVideo();
     updateUI();
