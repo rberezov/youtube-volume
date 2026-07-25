@@ -969,8 +969,60 @@
     return controls ? { host: controls, overlay: false } : null;
   }
 
+  /* ------------------------------------------------------------------ *
+   * Скрытие штатной громкости в Shorts
+   *
+   * На обычной странице хватает класса ytev-active на плеере: штатные
+   * кнопка и ползунок лежат внутри него. В Shorts же управление звуком
+   * рисует обвязка ленты — она вне элемента плеера, и селектор до неё
+   * не доставал, из-за чего рядом с нашей шкалой оставалась вторая,
+   * штатная. Имён у этих элементов в новом интерфейсе несколько, поэтому
+   * ищем по признаку «volume/mute» в классе или id, ограничиваясь
+   * небольшими элементами (кнопка, а не контейнер всей панели).
+   * ------------------------------------------------------------------ */
+
+  const hiddenNative = new Set();
+  const VOLUME_HINT = /(^|[^a-z])(volume|mute)/i;
+
+  const shortsScope = () =>
+    document.querySelector('ytd-reel-video-renderer[is-active]') ||
+    document.querySelector('#shorts-container') ||
+    document.querySelector('ytd-shorts');
+
+  function hideNativeVolume() {
+    const scope = shortsScope();
+    if (!scope) return;
+    const candidates = scope.querySelectorAll(
+      '.ytp-mute-button, .ytp-volume-panel, .ytp-volume-area,' +
+        '[class*="volume" i], [class*="mute" i], [id*="volume" i], [id*="mute" i]'
+    );
+    for (const el of candidates) {
+      if (hiddenNative.has(el)) continue;
+      if (el.closest('.ytev-box, .ytev-overlay')) continue; // наше собственное
+      const cls = typeof el.className === 'string' ? el.className : '';
+      if (!VOLUME_HINT.test(cls) && !VOLUME_HINT.test(el.id || '')) continue;
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) continue; // уже не видно
+      if (r.width > 160 || r.height > 160) continue; // это контейнер, не кнопка
+      el.dataset.ytevHidden = '1';
+      el.style.display = 'none';
+      hiddenNative.add(el);
+    }
+  }
+
+  function restoreNativeVolume() {
+    for (const el of hiddenNative) {
+      if (el.isConnected && el.dataset.ytevHidden) {
+        el.style.display = '';
+        delete el.dataset.ytevHidden;
+      }
+    }
+    hiddenNative.clear();
+  }
+
   // Полный демонтаж: штатная громкость возвращается на место
   function teardownUI() {
+    restoreNativeVolume();
     for (const el of document.querySelectorAll('.ytev-active')) {
       el.classList.remove('ytev-active');
     }
@@ -994,6 +1046,9 @@
     if (!mount) return;
     const controls = mount.host;
     observePlayer();
+    // в Shorts штатная громкость лежит вне плеера — прячем отдельно
+    if (mount.overlay) hideNativeVolume();
+    else if (hiddenNative.size) restoreNativeVolume();
     if (ui && controls.contains(ui.box)) {
       if (ui.hiddenPill && !ui.hiddenPill.isConnected) markDonorPill(controls);
       bindVideo();

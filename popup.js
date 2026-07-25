@@ -40,6 +40,8 @@ function save() {
         enabled: $enabled.checked,
         gamma: Number($gamma.value),
         sliderScale: Number($scale.value),
+        shortsScale: Number($shorts.value),
+        useNativeSlider: $useNative.checked,
         showPercent: $showPercent.checked,
         autoCollapse: $autoCollapse.checked,
       },
