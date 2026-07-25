@@ -99,8 +99,9 @@
       display: flex;
       align-items: center;
       align-self: center;
+      box-sizing: border-box;
       min-width: 0;
-      margin-left: 6px;
+      margin: 0 8px;
     }
     #movie_player.ytp-big-mode .ytev-box {
       --ytev-track: 5px;
@@ -150,6 +151,7 @@
   let ui = null; // { box, slider, label }
   let boundVideo = null;
   let observedPlayer = null;
+  let observedPill = null;
 
   const getPlayer = () => document.getElementById('movie_player');
   const getVideo = () => {
@@ -191,6 +193,49 @@
     const s = getComputedStyle(el);
     return el.clientWidth - num(s.paddingLeft) - num(s.paddingRight);
   };
+
+  // «Пилюля» со штатными кнопками — сосед нашего блока слева: элемент
+  // рядом с которым мы вставлены и в котором живёт кнопка звука
+  function findPill() {
+    const controls = ui.box.parentElement;
+    if (!controls) return null;
+    let pill = controls.querySelector('.ytp-volume-area, .ytp-mute-button');
+    while (pill && pill.parentElement !== controls) pill = pill.parentElement;
+    return pill && pill !== ui.box ? pill : null;
+  }
+
+  // Свою рамку рисуем сами, копируя оформление соседней «пилюли» с
+  // кнопками: ширина штатной управляется скриптами YouTube под её
+  // собственное содержимое, поэтому вставлять ползунок внутрь неё нельзя —
+  // он вылезает за фон. Копирование с живого элемента даёт точное
+  // совпадение в любой версии интерфейса и теме; в старом интерфейсе фон
+  // прозрачный — прозрачным станет и наш блок.
+  function syncFrameStyle() {
+    const pill = findPill();
+    if (resizeObserver && pill && pill !== observedPill) {
+      resizeObserver.observe(pill); // рамка меняет высоту в big-mode
+      observedPill = pill;
+    }
+    const st = ui.box.style;
+    const s = pill && getComputedStyle(pill);
+    const bg = s && s.backgroundColor;
+    const transparent =
+      !bg || bg === 'transparent' || /rgba\([^)]*,\s*0\s*\)$/.test(bg);
+    if (transparent) {
+      st.background = '';
+      st.borderRadius = '';
+      st.height = '';
+      st.padding = '';
+      st.backdropFilter = '';
+      return;
+    }
+    const h = Math.round(pill.getBoundingClientRect().height);
+    st.background = bg;
+    st.borderRadius = s.borderRadius;
+    st.height = h ? h + 'px' : '';
+    st.padding = '0 ' + (h ? Math.round(h * 0.3) : 14) + 'px';
+    st.backdropFilter = s.backdropFilter && s.backdropFilter !== 'none' ? s.backdropFilter : '';
+  }
 
   // Свободное место под ползунок: идём от нашего блока вверх до строки
   // управления (через любое число обёрток — в новом интерфейсе YouTube
@@ -239,6 +284,7 @@
     player.classList.remove('ytev-fallback');
     ui.box.style.display = '';
     ui.label.style.display = SETTINGS.showPercent ? '' : 'none';
+    syncFrameStyle(); // поля рамки влияют на замер — обновляем до него
     if (innerWidth(row) <= 0) return;
 
     // Меряем, сжав ползунок до минимума: соседи (название главы) тоже
@@ -322,6 +368,11 @@
       return;
     }
 
+    // блоки, оставшиеся от прежней загрузки расширения (после обновления)
+    for (const stale of document.querySelectorAll('.ytev-box')) {
+      if (!ui || stale !== ui.box) stale.remove();
+    }
+
     const box = document.createElement('div');
     box.className = 'ytev-box';
 
@@ -337,13 +388,11 @@
 
     box.append(slider, label);
 
-    // встаём точно на место штатного ползунка — внутрь его контейнера.
-    // В новом интерфейсе YouTube кнопки слева обёрнуты в скруглённую
-    // «пилюлю»; если вставить блок снаружи, штатная рамка не охватит его
-    const anchor =
-      controls.querySelector('.ytp-volume-panel') ||
-      controls.querySelector('.ytp-volume-area') ||
-      controls.querySelector('.ytp-mute-button');
+    // встаём после «пилюли» с кнопками, а не внутрь неё: YouTube управляет
+    // её шириной из скриптов под собственное содержимое, и вставленный
+    // внутрь ползунок вылезал за фон. Рамку блок рисует сам (syncFrameStyle)
+    let anchor = controls.querySelector('.ytp-volume-area, .ytp-mute-button');
+    while (anchor && anchor.parentElement !== controls) anchor = anchor.parentElement;
     if (anchor) anchor.after(box);
     else controls.appendChild(box);
 
