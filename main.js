@@ -343,11 +343,19 @@
       position: absolute;
       top: 0;
       left: 0;
-      z-index: 60;
+      z-index: 1000;
       display: flex;
       pointer-events: none;
     }
-    .ytev-overlay .ytev-box { pointer-events: auto; }
+    .ytev-overlay .ytev-box {
+      pointer-events: auto;
+      transition: opacity .2s ease;
+    }
+    /* указатель ушёл с ролика — блок скрывается, как штатные кнопки */
+    .ytev-overlay.ytev-idle .ytev-box {
+      opacity: 0;
+      pointer-events: none;
+    }
     /* своя кнопка звука с оригинальным значком YouTube: почти на всю
        высоту рамки, как у штатной, — сам глиф имеет поля внутри viewBox */
     .ytev-mute {
@@ -506,11 +514,24 @@
   // переезжает между роликами), на обычной странице — #movie_player
   function getPlayer() {
     if (isShorts()) {
-      const shorts =
-        document.querySelector('ytd-reel-video-renderer[is-active] .html5-video-player') ||
-        document.querySelector('#shorts-player .html5-video-player') ||
-        document.querySelector('#shorts-player');
-      if (shorts) return shorts;
+      // разметку Shorts YouTube меняет чаще прочего, поэтому пробуем
+      // несколько путей и требуем, чтобы элемент был реально виден
+      const selectors = [
+        'ytd-reel-video-renderer[is-active] .html5-video-player',
+        '#shorts-player .html5-video-player',
+        'ytd-shorts .html5-video-player',
+        '#shorts-player',
+      ];
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el && el.clientWidth && el.clientHeight) return el;
+      }
+      // последний рубеж: контейнер видимого видео на странице
+      const videos = [...document.querySelectorAll('video')].filter((v) => v.clientWidth);
+      const video = videos.find((v) => !v.paused) || videos[0];
+      const host =
+        video && video.closest('.html5-video-player, #shorts-player, ytd-reel-video-renderer');
+      if (host) return host;
     }
     return document.getElementById('movie_player');
   }
@@ -601,6 +622,13 @@
   }
 
   const num = (v) => parseFloat(v) || 0;
+
+  // Доля ширины плеера под шкалу: у Shorts своя настройка, потому что
+  // плеер там узкий (значение по умолчанию — на случай старой записи)
+  const activeScale = () =>
+    isShorts()
+      ? num(SETTINGS.shortsScale) || 50
+      : num(SETTINGS.sliderScale) || 20;
 
   const outerWidth = (el) => {
     const s = getComputedStyle(el);
@@ -821,8 +849,7 @@
       ui.slider.style.width = MIN_SLIDER + 'px';
       const extra = ui.box.getBoundingClientRect().width - MIN_SLIDER;
       const room = pw - 2 * shortsGap - extra;
-      const scale = num(SETTINGS.shortsScale) || 50;
-      const width = Math.max(MIN_SLIDER, Math.min(pw * (scale / 100), room));
+      const width = Math.max(MIN_SLIDER, Math.min(pw * (activeScale() / 100), room));
       ui.slider.style.width = Math.round(width) + 'px';
       ui.trackW = ui.slider.getBoundingClientRect().width;
       ui.thumbPx = num(getComputedStyle(ui.box).getPropertyValue('--ytev-thumb'));
@@ -864,10 +891,8 @@
       free = freeSpace(row);
     }
 
-    // длина — настраиваемая доля ширины плеера, ограниченная свободным
-    // местом (защита от нечисловой настройки — старый формат записи)
-    const scale = num(SETTINGS.sliderScale) || 20;
-    const desired = player.clientWidth * (scale / 100);
+    // длина — настраиваемая доля ширины плеера, ограниченная свободным местом
+    const desired = player.clientWidth * (activeScale() / 100);
     ui.slider.style.width =
       Math.round(Math.max(MIN_SLIDER, Math.min(desired, free))) + 'px';
 
@@ -966,21 +991,47 @@
   function findMount() {
     const player = getPlayer();
     if (!player) return null;
-    if (isShorts()) {
-      let host = player.querySelector(':scope > .ytev-overlay');
-      if (!host) {
-        host = document.createElement('div');
-        host.className = 'ytev-overlay';
-        // слой позиционируется от плеера — он должен быть точкой отсчёта
-        if (getComputedStyle(player).position === 'static') {
-          player.style.position = 'relative';
-        }
-        player.appendChild(host);
-      }
-      return { host, overlay: true };
-    }
+    // Сначала штатная строка управления — она есть и в Shorts (кнопки
+    // паузы и звука рядом с полосой перемотки). Так блок встаёт ровно
+    // туда, где было штатное управление, и живёт по правилам YouTube,
+    // включая автоскрытие панели.
     const controls = player.querySelector('.ytp-left-controls');
-    return controls ? { host: controls, overlay: false } : null;
+    if (controls && controls.clientWidth) return { host: controls, overlay: false };
+    if (!isShorts()) return null;
+    // Строки управления нет — кладём блок в собственный слой поверх плеера
+    let host = player.querySelector(':scope > .ytev-overlay');
+    if (!host) {
+      host = document.createElement('div');
+      host.className = 'ytev-overlay';
+      // слой позиционируется от плеера — он должен быть точкой отсчёта
+      if (getComputedStyle(player).position === 'static') {
+        player.style.position = 'relative';
+      }
+      player.appendChild(host);
+      watchPointer(player, host);
+    }
+    return { host, overlay: true };
+  }
+
+  // Автоскрытие накладного блока: пока указатель на ролике — блок виден,
+  // ушёл — исчезает, как штатные кнопки Shorts
+  const pointerWatched = new WeakSet();
+  function watchPointer(player, host) {
+    const scope = shortsScope() || player;
+    if (pointerWatched.has(scope)) return;
+    pointerWatched.add(scope);
+    let hideTimer = 0;
+    const show = () => {
+      clearTimeout(hideTimer);
+      host.classList.remove('ytev-idle');
+    };
+    const hide = () => {
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => host.classList.add('ytev-idle'), 400);
+    };
+    scope.addEventListener('pointerenter', show);
+    scope.addEventListener('pointermove', show);
+    scope.addEventListener('pointerleave', hide);
   }
 
   /* ------------------------------------------------------------------ *
@@ -1118,8 +1169,9 @@
     if (!mount) return;
     const controls = mount.host;
     observePlayer();
-    // в Shorts штатная громкость лежит вне плеера — прячем отдельно
-    if (mount.overlay) hideNativeVolume();
+    // в Shorts штатная громкость может лежать и вне плеера (обвязка
+    // ленты) — правила для плеера туда не достают, прячем отдельно
+    if (isShorts()) hideNativeVolume();
     else if (hiddenNative.size) restoreNativeVolume();
     if (ui && controls.contains(ui.box)) {
       if (ui.hiddenPill && !ui.hiddenPill.isConnected) markDonorPill(controls);
