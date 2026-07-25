@@ -102,6 +102,12 @@
       box-sizing: border-box;
       min-width: 0;
       margin: 0 8px;
+      transition: box-shadow .1s;
+    }
+    /* подсветка рамки при наведении — как у штатных кнопок YouTube;
+       внутренняя тень не трогает цвета содержимого и не меняет размеров */
+    .ytev-box.ytev-framed:hover {
+      box-shadow: inset 0 0 0 999px rgba(255, 255, 255, .1);
     }
     #movie_player.ytp-big-mode .ytev-box {
       --ytev-track: 5px;
@@ -134,8 +140,8 @@
       font-family: Roboto, Arial, sans-serif;
       font-size: var(--ytev-font);
       line-height: 1;
-      margin-left: .7em;
-      min-width: 3.4em;
+      margin-left: .55em;
+      min-width: 2.5em; /* ровно под «100%», чтобы рамка не гуляла по ширине */
       text-align: left;
       white-space: nowrap;
       user-select: none;
@@ -148,7 +154,8 @@
   const MIN_SLIDER = 48; // короче — бесполезно, лучше спрятать
   const SAFETY_GAP = 16; // запас, чтобы панель не «поехала»
 
-  let ui = null; // { box, slider, label }
+  // { box, slider, label, mute, muteHome, muteRef, hiddenPill }
+  let ui = null;
   let boundVideo = null;
   let observedPlayer = null;
   let observedPill = null;
@@ -194,14 +201,75 @@
     return el.clientWidth - num(s.paddingLeft) - num(s.paddingRight);
   };
 
-  // «Пилюля» со штатными кнопками — сосед нашего блока слева: элемент
-  // рядом с которым мы вставлены и в котором живёт кнопка звука
+  // «Пилюля» со штатными кнопками — элемент, рядом с которым мы вставлены
+  // и в котором изначально жила кнопка звука (сама кнопка теперь может
+  // находиться внутри нашего блока)
   function findPill() {
     const controls = ui.box.parentElement;
     if (!controls) return null;
-    let pill = controls.querySelector('.ytp-volume-area, .ytp-mute-button');
+    let el =
+      (ui.hiddenPill && ui.hiddenPill.isConnected ? ui.hiddenPill : null) ||
+      (ui.muteHome && ui.muteHome.isConnected ? ui.muteHome : null) ||
+      controls.querySelector('.ytp-volume-area, .ytp-mute-button');
+    if (!el || ui.box.contains(el)) return null;
+    while (el && el.parentElement !== controls) el = el.parentElement;
+    return el && el !== ui.box ? el : null;
+  }
+
+  // Переносим штатную кнопку mute внутрь нашего блока — ползунок и кнопка
+  // оказываются в одной рамке. Слушатели YouTube при перемещении узла
+  // сохраняются. Если после переноса в «пилюле» не осталось видимых
+  // кнопок, прячем её целиком (иначе висел бы пустой кружок фона).
+  function adoptMute(controls) {
+    const mute = controls.querySelector('.ytp-mute-button');
+    if (!mute || ui.box.contains(mute)) return;
+    ui.mute = mute;
+    ui.muteHome = mute.parentElement;
+    ui.muteRef = mute.nextElementSibling;
+    ui.box.prepend(mute);
+    ui.hiddenPill = null;
+    let pill = ui.muteHome;
     while (pill && pill.parentElement !== controls) pill = pill.parentElement;
-    return pill && pill !== ui.box ? pill : null;
+    if (pill && pill !== ui.box) {
+      const hasVisible = [...pill.querySelectorAll('button, [role="button"]')]
+        .some((b) => b.offsetWidth > 0);
+      if (!hasVisible) {
+        ui.hiddenPill = pill;
+        pill.style.display = 'none';
+      }
+    }
+  }
+
+  // Нормальный режим: кнопка в нашем блоке, пустая пилюля спрятана
+  function enterNormal(player) {
+    player.classList.remove('ytev-fallback');
+    if (ui.mute && ui.mute.isConnected && ui.mute.parentElement !== ui.box) {
+      ui.box.prepend(ui.mute);
+    }
+    if (ui.hiddenPill && ui.hiddenPill.isConnected) {
+      ui.hiddenPill.style.display = 'none';
+    }
+    ui.box.style.display = '';
+  }
+
+  // Откат (узкий плеер): наш блок спрятан, кнопка возвращается на родное
+  // место рядом со штатным ползунком, пилюля снова видима
+  function enterFallback(player) {
+    ui.box.style.display = 'none';
+    if (
+      ui.mute &&
+      ui.muteHome &&
+      ui.muteHome.isConnected &&
+      ui.mute.parentElement === ui.box
+    ) {
+      const ref =
+        ui.muteRef && ui.muteRef.parentElement === ui.muteHome ? ui.muteRef : null;
+      ui.muteHome.insertBefore(ui.mute, ref);
+    }
+    if (ui.hiddenPill && ui.hiddenPill.isConnected) {
+      ui.hiddenPill.style.display = '';
+    }
+    player.classList.add('ytev-fallback');
   }
 
   // Свою рамку рисуем сами, копируя оформление соседней «пилюли» с
@@ -221,6 +289,7 @@
     const bg = s && s.backgroundColor;
     const transparent =
       !bg || bg === 'transparent' || /rgba\([^)]*,\s*0\s*\)$/.test(bg);
+    ui.box.classList.toggle('ytev-framed', !transparent);
     if (transparent) {
       st.background = '';
       st.borderRadius = '';
@@ -229,11 +298,29 @@
       st.backdropFilter = '';
       return;
     }
-    const h = Math.round(pill.getBoundingClientRect().height);
+    // пилюля может быть спрятана (кнопка переехала к нам) — высоту тогда
+    // берём с другой видимой пилюли той же строки
+    let h = Math.round(pill.getBoundingClientRect().height);
+    if (!h) {
+      const player = getPlayer();
+      for (const sel of ['.ytp-time-display', '.ytp-right-controls']) {
+        const ref = player && player.querySelector(sel);
+        const hh = ref ? Math.round(ref.getBoundingClientRect().height) : 0;
+        if (hh) {
+          h = hh;
+          break;
+        }
+      }
+    }
     st.background = bg;
     st.borderRadius = s.borderRadius;
     st.height = h ? h + 'px' : '';
-    st.padding = '0 ' + (h ? Math.round(h * 0.3) : 14) + 'px';
+    // отступы рамки масштабируются вместе с её высотой; слева кнопка mute
+    // несёт собственные поля, поэтому отступ меньше
+    const padR = h ? Math.round(h * 0.3) : 14;
+    const padL =
+      ui.mute && ui.box.contains(ui.mute) ? Math.round(padR * 0.4) : padR;
+    st.padding = '0 ' + padR + 'px 0 ' + padL + 'px';
     st.backdropFilter = s.backdropFilter && s.backdropFilter !== 'none' ? s.backdropFilter : '';
   }
 
@@ -281,8 +368,7 @@
 
     // меряем в видимом состоянии и без штатного ползунка, иначе решение
     // зависело бы от предыдущего и режим отката «залипал» бы
-    player.classList.remove('ytev-fallback');
-    ui.box.style.display = '';
+    enterNormal(player);
     ui.label.style.display = SETTINGS.showPercent ? '' : 'none';
     syncFrameStyle(); // поля рамки влияют на замер — обновляем до него
     if (innerWidth(row) <= 0) return;
@@ -308,9 +394,9 @@
 
     // подстраховка на случай неточного замера: если flex всё-таки сжал
     // ползунок до бесполезной длины — отдаём место штатному
-    const tooSmall = ui.slider.getBoundingClientRect().width < MIN_SLIDER - 1;
-    ui.box.style.display = tooSmall ? 'none' : '';
-    player.classList.toggle('ytev-fallback', tooSmall);
+    if (ui.slider.getBoundingClientRect().width < MIN_SLIDER - 1) {
+      enterFallback(player);
+    }
   }
 
   function bindVideo() {
@@ -363,14 +449,19 @@
     if (!controls) return;
     observePlayer();
     if (ui && controls.contains(ui.box)) {
+      if (!ui.mute || !ui.mute.isConnected) adoptMute(controls);
       bindVideo();
       layout();
       return;
     }
 
-    // блоки, оставшиеся от прежней загрузки расширения (после обновления)
+    // блоки, оставшиеся от прежней загрузки расширения (после обновления);
+    // живую кнопку mute из такого блока возвращаем в панель, не удаляем
     for (const stale of document.querySelectorAll('.ytev-box')) {
-      if (!ui || stale !== ui.box) stale.remove();
+      if (ui && stale === ui.box) continue;
+      const orphanMute = stale.querySelector('.ytp-mute-button');
+      if (orphanMute) stale.before(orphanMute);
+      stale.remove();
     }
 
     const box = document.createElement('div');
@@ -414,6 +505,7 @@
     );
 
     ui = { box, slider, label };
+    adoptMute(controls);
     observeChain();
     bindVideo();
     updateUI();
