@@ -10,6 +10,13 @@ const saved = [];
 let localVolume = 0.37;
 let localMuted = false;
 let now = 1000;
+const activeVideo = { muted: false, volume: 0.55 };
+
+const documentMock = {
+  querySelector(selector) {
+    return selector.includes('video') ? activeVideo : null;
+  },
+};
 
 const windowMock = {
   addEventListener(type, listener) {
@@ -58,6 +65,7 @@ const context = vm.createContext({
   chrome: chromeMock,
   clearTimeout() {},
   Date: { now: () => now },
+  document: documentMock,
   location: { origin: 'https://www.youtube.com' },
   window: windowMock,
   setTimeout(callback) {
@@ -182,6 +190,7 @@ assert.equal(saved[1].savedMuted, true);
 now += 300;
 const ownSlider = {
   tagName: 'INPUT',
+  value: '55',
   matches(selector) {
     return selector === '.ytev-slider';
   },
@@ -193,6 +202,21 @@ listeners.get('input')({
   isTrusted: true,
   target: ownSlider,
 });
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_MUTED', channel, muted: true },
+});
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 0.99 },
+});
+assert.equal(
+  saved.length,
+  2,
+  'forged values must not consume or reuse a trusted slider intent'
+);
 onMessage({
   source: windowMock,
   origin: 'https://www.youtube.com',
@@ -232,6 +256,7 @@ assert.equal(saved.length, 5, 'Enter on the mute button must authorize mute');
 assert.equal(saved[4].savedMuted, true);
 
 now += 300;
+activeVideo.muted = true;
 listeners.get('click')({
   isTrusted: true,
   target: {
