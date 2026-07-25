@@ -102,13 +102,24 @@
       box-sizing: border-box;
       min-width: 0;
       margin: 0 8px;
-      transition: box-shadow .1s;
+      position: relative;
     }
-    /* подсветка рамки при наведении — как у штатных кнопок YouTube;
-       внутренняя тень не трогает цвета содержимого и не меняет размеров */
-    .ytev-box.ytev-framed:hover {
-      box-shadow: inset 0 0 0 999px rgba(255, 255, 255, .1);
+    /* содержимое поверх слоя подсветки */
+    .ytev-box > * { position: relative; z-index: 1; }
+    /* подсветка при наведении — скруглённый слой с отступом от рамки,
+       как у штатных элементов YouTube; на раскладку не влияет */
+    .ytev-box.ytev-framed::after {
+      content: '';
+      position: absolute;
+      inset: var(--ytev-hl-inset, 4px);
+      border-radius: var(--ytev-hl-radius, 18px);
+      background: rgba(255, 255, 255, .12);
+      opacity: 0;
+      transition: opacity .1s;
+      pointer-events: none;
+      z-index: 0;
     }
+    .ytev-box.ytev-framed:hover::after { opacity: 1; }
     #movie_player.ytp-big-mode .ytev-box {
       --ytev-track: 5px;
       --ytev-thumb: 18px;
@@ -296,31 +307,44 @@
       st.height = '';
       st.padding = '';
       st.backdropFilter = '';
+      st.removeProperty('--ytev-hl-inset');
+      st.removeProperty('--ytev-hl-radius');
       return;
-    }
-    // пилюля может быть спрятана (кнопка переехала к нам) — высоту тогда
-    // берём с другой видимой пилюли той же строки
-    let h = Math.round(pill.getBoundingClientRect().height);
-    if (!h) {
-      const player = getPlayer();
-      for (const sel of ['.ytp-time-display', '.ytp-right-controls']) {
-        const ref = player && player.querySelector(sel);
-        const hh = ref ? Math.round(ref.getBoundingClientRect().height) : 0;
-        if (hh) {
-          h = hh;
-          break;
-        }
-      }
     }
     st.background = bg;
     st.borderRadius = s.borderRadius;
-    st.height = h ? h + 'px' : '';
-    // отступы рамки масштабируются вместе с её высотой; слева кнопка mute
-    // несёт собственные поля, поэтому отступ меньше
-    const padR = h ? Math.round(h * 0.3) : 14;
-    const padL =
-      ui.mute && ui.box.contains(ui.mute) ? Math.round(padR * 0.4) : padR;
+    // Высоту рамке не назначаем, когда внутри живёт родная кнопка mute:
+    // кнопка и задаёт высоту — ровно ту же, что у соседних пилюль,
+    // которые YouTube обтягивает вокруг таких же кнопок. Только если
+    // кнопку забрать не удалось, копируем высоту с пилюли или соседей.
+    const muteInBox = ui.mute && ui.box.contains(ui.mute);
+    if (muteInBox) {
+      st.height = '';
+    } else {
+      let h = Math.round(pill.getBoundingClientRect().height);
+      if (!h) {
+        const player = getPlayer();
+        for (const sel of ['.ytp-time-display', '.ytp-right-controls']) {
+          const ref = player && player.querySelector(sel);
+          const hh = ref ? Math.round(ref.getBoundingClientRect().height) : 0;
+          if (hh) {
+            h = hh;
+            break;
+          }
+        }
+      }
+      st.height = h ? h + 'px' : '';
+    }
+    // отступы рамки и параметры слоя подсветки масштабируются от
+    // фактической высоты; слева кнопка несёт собственные поля — меньше
+    const bh = Math.round(ui.box.getBoundingClientRect().height) || 40;
+    const padR = Math.round(bh * 0.3);
+    const padL = muteInBox ? Math.round(padR * 0.4) : padR;
     st.padding = '0 ' + padR + 'px 0 ' + padL + 'px';
+    const inset = Math.max(3, Math.round(bh * 0.09));
+    const radius = parseFloat(s.borderRadius) || bh / 2;
+    st.setProperty('--ytev-hl-inset', inset + 'px');
+    st.setProperty('--ytev-hl-radius', Math.max(4, Math.round(radius - inset)) + 'px');
     st.backdropFilter = s.backdropFilter && s.backdropFilter !== 'none' ? s.backdropFilter : '';
   }
 
