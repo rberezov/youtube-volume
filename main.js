@@ -121,6 +121,7 @@
       width: auto !important;
       aspect-ratio: 1 / 1 !important;
       min-height: 0 !important;
+      min-width: 0 !important;
       padding: 0 !important;
       margin: 0 !important;
       display: inline-flex !important;
@@ -128,6 +129,17 @@
       justify-content: center !important;
       box-sizing: border-box !important;
       overflow: visible;
+    }
+    /* сам значок YouTube размещает внутри кнопки собственной раскладкой
+       (абсолютные позиции/поля под другой размер) — принудительно
+       растягиваем прямых потомков на кнопку, чтобы значок был по центру */
+    .ytev-box.ytev-framed .ytp-mute-button > * {
+      position: static !important;
+      width: 100% !important;
+      height: 100% !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      box-sizing: border-box !important;
     }
     /* подсветка при наведении — скруглённый слой с отступом только по
        бокам, как у штатных элементов YouTube; на раскладку не влияет */
@@ -175,7 +187,7 @@
       font-size: var(--ytev-font);
       line-height: 1;
       min-width: 2.5em; /* ровно под «100%», чтобы рамка не гуляла по ширине */
-      text-align: left;
+      text-align: center; /* запас ширины делится поровну на обе стороны */
       white-space: nowrap;
       user-select: none;
     }
