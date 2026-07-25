@@ -352,7 +352,7 @@
       transition: opacity .2s ease;
     }
     /* указатель ушёл с ролика — блок скрывается, как штатные кнопки */
-    .ytev-overlay.ytev-idle .ytev-box {
+    .ytev-pointer-away .ytev-overlay .ytev-box {
       opacity: 0;
       pointer-events: none;
     }
@@ -896,6 +896,9 @@
     ui.slider.style.width =
       Math.round(Math.max(MIN_SLIDER, Math.min(desired, free))) + 'px';
 
+    checkRowOverlap();
+    if (!ui) return; // пересобрались в другом месте — раскладку доделает новый цикл
+
     // размеры дорожки и бегунка для расчёта заливки (см. paint)
     ui.trackW = ui.slider.getBoundingClientRect().width;
     ui.thumbPx = num(getComputedStyle(ui.box).getPropertyValue('--ytev-thumb'));
@@ -994,9 +997,13 @@
     // Сначала штатная строка управления — она есть и в Shorts (кнопки
     // паузы и звука рядом с полосой перемотки). Так блок встаёт ровно
     // туда, где было штатное управление, и живёт по правилам YouTube,
-    // включая автоскрытие панели.
+    // включая автоскрытие панели. Исключение — если в Shorts полоса
+    // перемотки размещена поверх строки: тогда наша шкала легла бы на
+    // неё внахлёст, и мы уходим в накладной слой (см. checkRowOverlap).
     const controls = player.querySelector('.ytp-left-controls');
-    if (controls && controls.clientWidth) return { host: controls, overlay: false };
+    if (controls && controls.clientWidth && !(isShorts() && shortsRowUnusable)) {
+      return { host: controls, overlay: false };
+    }
     if (!isShorts()) return null;
     // Строки управления нет — кладём блок в собственный слой поверх плеера
     let host = player.querySelector(':scope > .ytev-overlay');
@@ -1008,30 +1015,58 @@
         player.style.position = 'relative';
       }
       player.appendChild(host);
-      watchPointer(player, host);
     }
     return { host, overlay: true };
   }
 
   // Автоскрытие накладного блока: пока указатель на ролике — блок виден,
-  // ушёл — исчезает, как штатные кнопки Shorts
+  // ушёл — исчезает, как штатные кнопки Shorts. Признак вешаем на саму
+  // ленту, а не на слой: слой пересоздаётся, а обработчики остаются.
   const pointerWatched = new WeakSet();
-  function watchPointer(player, host) {
+  function watchPointer(player) {
     const scope = shortsScope() || player;
     if (pointerWatched.has(scope)) return;
     pointerWatched.add(scope);
     let hideTimer = 0;
     const show = () => {
       clearTimeout(hideTimer);
-      host.classList.remove('ytev-idle');
+      scope.classList.remove('ytev-pointer-away');
     };
     const hide = () => {
       clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => host.classList.add('ytev-idle'), 400);
+      hideTimer = setTimeout(() => scope.classList.add('ytev-pointer-away'), 400);
     };
     scope.addEventListener('pointerenter', show);
     scope.addEventListener('pointermove', show);
     scope.addEventListener('pointerleave', hide);
+  }
+
+  // Проверка на нахлёст со штатной полосой перемотки: в Shorts она может
+  // лежать поверх строки управления, и тогда встроенная в строку шкала
+  // накрывает её. Заметив это, навсегда переходим на накладной слой.
+  let shortsRowUnusable = false;
+  function checkRowOverlap() {
+    if (!ui || ui.overlay || !isShorts() || shortsRowUnusable) return;
+    const player = getPlayer();
+    if (!player) return;
+    const box = ui.box.getBoundingClientRect();
+    if (!box.width) return;
+    const bars = player.querySelectorAll(
+      '.ytp-progress-bar-container, .ytp-progress-bar, [class*="progress-bar" i]'
+    );
+    for (const bar of bars) {
+      const r = bar.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      const ix = Math.min(box.right, r.right) - Math.max(box.left, r.left);
+      const iy = Math.min(box.bottom, r.bottom) - Math.max(box.top, r.top);
+      // полоса перемотки тонкая (4px), поэтому порог по вертикали
+      // минимальный — иначе полное перекрытие не считалось бы нахлёстом
+      if (ix > 2 && iy > 1) {
+        shortsRowUnusable = true;
+        ensureUI(); // пересобираемся в слое поверх плеера
+        return;
+      }
+    }
   }
 
   /* ------------------------------------------------------------------ *
@@ -1067,25 +1102,36 @@
     if (!scope) return;
     const player = getPlayer();
     const pr = player ? player.getBoundingClientRect() : null;
-    const candidates = scope.querySelectorAll(
-      '.ytp-mute-button, .ytp-volume-panel, .ytp-volume-area,' +
-        '[class*="volume" i], [class*="mute" i], [id*="volume" i], [id*="mute" i]'
-    );
-    for (const el of candidates) {
-      if (hiddenNative.has(el)) continue;
-      if (el.closest('.ytev-box, .ytev-overlay')) continue; // наше собственное
+    const candidates = [
+      ...scope.querySelectorAll(
+        '.ytp-mute-button, .ytp-volume-panel, .ytp-volume-area,' +
+          '[class*="volume" i], [class*="mute" i], [id*="volume" i], [id*="mute" i]'
+      ),
+    ].filter((el) => {
+      if (hiddenNative.has(el)) return false;
+      if (el.closest('.ytev-box, .ytev-overlay')) return false; // наше собственное
       const cls = typeof el.className === 'string' ? el.className : '';
-      if (!VOLUME_HINT.test(cls) && !VOLUME_HINT.test(el.id || '')) continue;
+      if (!VOLUME_HINT.test(cls) && !VOLUME_HINT.test(el.id || '')) return false;
       const r = el.getBoundingClientRect();
-      if (!r.width || !r.height) continue; // уже не видно
-      if (r.width > 160 || r.height > 160) continue; // это контейнер, не кнопка
-      // запоминаем место кнопки, пока она видна: туда встанет наш блок
-      if (!shortsAnchor && pr && pr.width && pr.height && isButtonLike(el, r)) {
+      if (!r.width || !r.height) return false; // уже не видно
+      return r.width <= 160 && r.height <= 160; // это кнопка, а не контейнер
+    });
+
+    // Якорь выбираем ДО того, как что-то скроем: контейнер громкости идёт
+    // в списке раньше кнопки внутри него, и, скрыв его первым, мы бы
+    // измеряли кнопку с нулевыми размерами и потеряли место
+    if (!shortsAnchor && pr && pr.width && pr.height) {
+      const button = candidates.find((el) => isButtonLike(el, el.getBoundingClientRect()));
+      if (button) {
+        const r = button.getBoundingClientRect();
         shortsAnchor = {
           fx: (r.left + r.width / 2 - pr.left) / pr.width,
           fy: (r.top + r.height / 2 - pr.top) / pr.height,
         };
       }
+    }
+
+    for (const el of candidates) {
       el.dataset.ytevHidden = '1';
       el.style.display = 'none';
       hiddenNative.add(el);
@@ -1125,7 +1171,15 @@
     };
     const btn = ui.muteBtn.getBoundingClientRect();
     const wantX = pr.left + shortsAnchor.fx * pr.width;
-    const wantY = pr.top + shortsAnchor.fy * pr.height;
+    let wantY = pr.top + shortsAnchor.fy * pr.height;
+    // если штатная кнопка сидит в панели управления, встаём НАД панелью:
+    // иначе развёрнутая шкала накрыла бы полосу перемотки
+    const bar = player.querySelector('.ytp-chrome-bottom');
+    const barRect = bar && bar.getBoundingClientRect();
+    if (barRect && barRect.height && wantY > barRect.top - 1) {
+      const box = ui.box.getBoundingClientRect();
+      wantY = barRect.top - shortsGap - box.height / 2;
+    }
     host.style.left = Math.round(cur.left + wantX - (btn.left + btn.width / 2)) + 'px';
     host.style.top = Math.round(cur.top + wantY - (btn.top + btn.height / 2)) + 'px';
 
@@ -1171,8 +1225,12 @@
     observePlayer();
     // в Shorts штатная громкость может лежать и вне плеера (обвязка
     // ленты) — правила для плеера туда не достают, прячем отдельно
-    if (isShorts()) hideNativeVolume();
-    else if (hiddenNative.size) restoreNativeVolume();
+    if (isShorts()) {
+      hideNativeVolume();
+      watchPointer(getPlayer()); // автоскрытие вместе с уходом указателя
+    } else if (hiddenNative.size) {
+      restoreNativeVolume();
+    }
     if (ui && controls.contains(ui.box)) {
       if (ui.hiddenPill && !ui.hiddenPill.isConnected) markDonorPill(controls);
       bindVideo();
@@ -1180,13 +1238,19 @@
       return;
     }
 
-    // блоки, оставшиеся от прежней загрузки расширения (после обновления);
-    // живую штатную кнопку из такого блока возвращаем в панель, не удаляем
+    // Сейчас будет собран новый блок, поэтому убираем ВСЕ прежние —
+    // включая текущий. Раньше текущий пропускался, и при смене точки
+    // монтирования (накладной слой → строка управления, пересоздание
+    // плеера) на странице оставались два блока внахлёст.
     for (const stale of document.querySelectorAll('.ytev-box')) {
-      if (ui && stale === ui.box) continue;
       const orphanMute = stale.querySelector('.ytp-mute-button');
-      if (orphanMute) stale.before(orphanMute);
+      if (orphanMute) stale.before(orphanMute); // живую штатную кнопку возвращаем
       stale.remove();
+    }
+    ui = null;
+    // опустевшие слои тоже убираем, кроме того, куда сейчас встаём
+    for (const host of document.querySelectorAll('.ytev-overlay')) {
+      if (host !== controls && !host.querySelector('.ytev-box')) host.remove();
     }
 
     const box = document.createElement('div');
