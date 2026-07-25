@@ -45,7 +45,12 @@
         return;
       }
       logicalVolume.set(this, v);
-      nativeDesc.set.call(this, toReal(v));
+      const real = toReal(v);
+      // не трогаем аудиотракт, если фактическое значение не меняется:
+      // повторные записи того же уровня не должны давать даже шанса на щелчки
+      if (Math.abs(nativeDesc.get.call(this) - real) > 1e-6) {
+        nativeDesc.set.call(this, real);
+      }
     },
   });
 
@@ -114,19 +119,18 @@
     }
     /* содержимое поверх слоя подсветки */
     .ytev-box > * { position: relative; z-index: 1; }
-    /* геометрия рамки: отступ --ytev-pad одинаков со всех сторон —
-       сверху/снизу его даёт центровка содержимого высотой
-       «рамка минус два отступа», слева/справа — боковые поля */
+    /* геометрия рамки: справа поле --ytev-pad, слева меньше — значок
+       YouTube (viewBox 36×36) несёт собственные внутренние поля */
     .ytev-box.ytev-framed {
-      padding: 0 var(--ytev-pad, 10px);
-      gap: calc(var(--ytev-pad, 10px) * .8);
+      padding: 0 var(--ytev-pad, 10px) 0 calc(var(--ytev-pad, 10px) * .25);
+      gap: calc(var(--ytev-pad, 10px) * .5);
     }
     .ytev-box:not(.ytev-framed) { gap: 6px; }
-    /* своя кнопка звука: квадрат точно по содержимому, значок — наш SVG,
-       поэтому центр и размер полностью предсказуемы */
+    /* своя кнопка звука с оригинальным значком YouTube: почти на всю
+       высоту рамки, как у штатной, — сам глиф имеет поля внутри viewBox */
     .ytev-mute {
       flex: none;
-      height: calc(100% - 2 * var(--ytev-pad, 10px));
+      height: calc(100% - 4px);
       aspect-ratio: 1 / 1;
       display: inline-flex;
       align-items: center;
@@ -138,10 +142,8 @@
       color: #fff;
       cursor: pointer;
     }
-    .ytev-box:not(.ytev-framed) .ytev-mute { height: 24px; }
+    .ytev-box:not(.ytev-framed) .ytev-mute { height: 36px; }
     .ytev-mute svg { width: 100%; height: 100%; display: block; }
-    .ytev-mute { transition: transform .1s; }
-    .ytev-mute:hover { transform: scale(1.08); }
     /* состояния значка как у YouTube: тихо — без волн, до 50% — одна
        волна, громче — две, выключен — перечёркнут; волны плавно
        появляются/уходят от «рупора» */
@@ -160,13 +162,6 @@
     .ytev-box[data-vol="high"] .ytev-i-w1,
     .ytev-box[data-vol="high"] .ytev-i-w2 { opacity: 1; transform: none; }
     .ytev-box[data-vol="muted"] .ytev-i-off { opacity: 1; }
-    /* пульс значка при каждом изменении громкости */
-    @keyframes ytev-vol-pulse {
-      0% { transform: scale(1); }
-      40% { transform: scale(1.14); }
-      100% { transform: scale(1); }
-    }
-    .ytev-mute.ytev-anim svg { animation: ytev-vol-pulse .25s ease; }
     /* автосворачивание: без курсора остаётся только кнопка; переходы
        включаются лишь на время переключения (.ytev-animating), чтобы
        не мешать замерам layout() */
@@ -267,7 +262,7 @@
 
   function paint(pct) {
     ui.slider.style.background =
-      `linear-gradient(to right, #f00 0% ${pct}%, rgba(255,255,255,.3) ${pct}% 100%)`;
+      `linear-gradient(to right, #fff 0% ${pct}%, rgba(255,255,255,.3) ${pct}% 100%)`;
   }
 
   function updateUI() {
@@ -283,14 +278,7 @@
     ui.box.dataset.vol = muted ? 'muted' : pct < 50 ? 'low' : 'high';
     if (ui.muteBtn) {
       ui.muteBtn.title = muted ? 'Включить звук (m)' : 'Отключить звук (m)';
-      // пульс значка при изменении громкости, как у YouTube
-      if (ui.prevPct !== undefined && Math.abs(pct - ui.prevPct) > 0.05) {
-        ui.muteBtn.classList.remove('ytev-anim');
-        void ui.muteBtn.offsetWidth; // перезапуск анимации
-        ui.muteBtn.classList.add('ytev-anim');
-      }
     }
-    ui.prevPct = pct;
     const real = toReal(pct / 100) * 100;
     ui.slider.title = SETTINGS.enabled
       ? `Громкость: ${fmt(pct)} (на выходе ≈ ${fmt(real)})`
@@ -633,16 +621,17 @@
     muteBtn.className = 'ytev-mute';
     muteBtn.type = 'button';
     {
+      // оригинальные пути значка громкости из плеера YouTube (36×36)
       const NS = 'http://www.w3.org/2000/svg';
       const svg = document.createElementNS(NS, 'svg');
-      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('viewBox', '0 0 36 36');
       svg.setAttribute('fill', 'currentColor');
       svg.setAttribute('aria-hidden', 'true');
       const paths = [
-        ['', 'M3 9v6h4l5 5V4L7 9H3z'],
-        ['ytev-i-w1', 'M16.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z'],
-        ['ytev-i-w2', 'M14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z'],
-        ['ytev-i-off', 'M4.27 3 3 4.27l16.73 16.73L21 19.73z'],
+        ['', 'M8,21 L12,21 L17,26 L17,10 L12,15 L8,15 L8,21 Z'],
+        ['ytev-i-w1', 'M19,14 L19,22 C20.48,21.32 21.5,19.77 21.5,18 C21.5,16.26 20.48,14.74 19,14 Z'],
+        ['ytev-i-w2', 'M19,11.29 C21.89,12.15 24,14.83 24,18 C24,21.17 21.89,23.85 19,24.71 L19,26.77 C23.01,25.86 26,22.28 26,18 C26,13.72 23.01,10.14 19,9.23 L19,11.29 Z'],
+        ['ytev-i-off', 'M9.25,9 L7.98,10.27 L24.71,27 L25.98,25.73 L9.25,9 Z'],
       ];
       for (const [cls, d] of paths) {
         const path = document.createElementNS(NS, 'path');
@@ -726,6 +715,15 @@
     updateCollapsed(false);
   }
 
+  // Во время регулировки громкость пишется ТОЛЬКО напрямую в
+  // video.volume — одно точное значение на событие. Вызов
+  // player.setVolume на каждом событии давал по две быстрые записи
+  // чуть разных значений (округлённое YouTube + наше точное) — слышимый
+  // треск; а дробное число в setVolume YouTube мог переокруглять сам и
+  // потрескивать даже без движения ползунка. Сохранение громкости в
+  // настройках YouTube делаем отложенно, один раз после конца движения
+  // и только целым числом.
+  let persistTimer = 0;
   function applySliderValue() {
     const video = getVideo();
     const player = getPlayer();
@@ -735,10 +733,14 @@
       if (player && typeof player.unMute === 'function') player.unMute();
       video.muted = false;
     }
-    // setVolume сохраняет громкость в настройках YouTube, но округляет до
-    // целых — поэтому после него выставляем точное значение напрямую.
-    if (player && typeof player.setVolume === 'function') player.setVolume(pct);
     video.volume = pct / 100;
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      const p = getPlayer();
+      const v = getVideo();
+      if (p && typeof p.setVolume === 'function') p.setVolume(Math.round(pct));
+      if (v) v.volume = pct / 100; // вернуть точное значение после округления
+    }, 250);
   }
 
   // YouTube — SPA: плеер может появляться/пересоздаваться при навигации
