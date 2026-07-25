@@ -44,6 +44,12 @@
   </div>
 
   <div class="row">
+    <label>Длина ползунка: <span class="value" id="scaleValue"></span>% ширины плеера</label>
+    <input type="range" id="sliderScale" min="5" max="50" step="1">
+    <div class="hint">Масштабируется вместе с плеером и сжимается, если в панели не хватает места. Шаг ползунка — 0.1%. Колесо мыши: ±1%, с Shift: ±0.1%.</div>
+  </div>
+
+  <div class="row">
     <label>
       <input type="checkbox" id="showPercent">
       Показывать проценты
@@ -56,7 +62,7 @@
       <input type="checkbox" id="autoCollapse">
       Сворачивать шкалу без курсора
     </label>
-    <div class="hint">Когда мышка не на шкале, остаётся только кнопка звука; при наведении шкала плавно разворачивается. Ползунок занимает всю свободную ширину панели (шаг 0.1%, колесо мыши: ±1%, с Shift: ±0.1%).</div>
+    <div class="hint">Когда мышка не на шкале, остаётся только кнопка звука; при наведении шкала плавно разворачивается.</div>
   </div>
 
   <script src="popup.js"></script>

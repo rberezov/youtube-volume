@@ -7,6 +7,7 @@
   const SETTINGS = {
     enabled: true,       // применять экспоненциальную кривую
     gamma: 3,            // крутизна кривой: real = logical^gamma (1 = линейно)
+    sliderScale: 20,     // длина ползунка в % от ширины плеера
     showPercent: true,   // подпись с процентами рядом с ползунком
     autoCollapse: false, // сворачивать шкалу, когда курсор не на ней
   };
@@ -183,13 +184,15 @@
       min-width: 0;
       opacity: 0;
     }
-    /* подсветка при наведении — скруглённый слой с отступом только по
-       бокам, как у штатных элементов YouTube; на раскладку не влияет */
+    /* подсветка при наведении — внутренний скруглённый слой с одинаковым
+       пиксельным зазором со всех четырёх сторон, как у штатных «пилюль»
+       YouTube; скругление уменьшено на величину зазора, чтобы контуры
+       были концентричными; на раскладку не влияет */
     .ytev-box.ytev-framed::after {
       content: '';
       position: absolute;
-      inset: 0 var(--ytev-hl-inset, 4px);
-      border-radius: inherit;
+      inset: var(--ytev-hl-inset, 4px);
+      border-radius: var(--ytev-hl-radius, 16px);
       background: rgba(255, 255, 255, .12);
       opacity: 0;
       transition: opacity .1s;
@@ -243,9 +246,10 @@
   const MIN_SLIDER = 48; // короче — бесполезно, лучше спрятать
   const SAFETY_GAP = 4;  // запас на округления, чтобы панель не «поехала»
 
-  // фиксированный отступ по краям рамки: вычисляется ОДИН раз из размеров
-  // плашки при первом измерении и дальше не меняется
-  let edgeGap = 0;
+  // фиксированные константы, вычисляются ОДИН раз из размеров плашки при
+  // первом измерении и дальше не меняются:
+  let edgeGap = 0; // отступ по краям рамки (снаружи)
+  let hlInset = 0; // зазор слоя подсветки от рамки, одинаковый со всех сторон
 
   // { box, slider, label, muteBtn, hiddenPill }
   let ui = null;
@@ -414,6 +418,7 @@
       st.backdropFilter = '';
       st.removeProperty('--ytev-pad');
       st.removeProperty('--ytev-hl-inset');
+      st.removeProperty('--ytev-hl-radius');
       return;
     }
     const s = surface.style;
@@ -428,7 +433,12 @@
     // справа — боковые поля рамки той же величины
     const pad = Math.max(6, Math.round(h * 0.23));
     st.setProperty('--ytev-pad', pad + 'px');
-    st.setProperty('--ytev-hl-inset', Math.max(3, Math.round(pad * 0.45)) + 'px');
+    // зазор подсветки: одна пиксельная величина со всех четырёх сторон,
+    // скругление слоя уменьшено на неё же — контуры концентричны
+    if (!hlInset) hlInset = Math.max(3, Math.round(h * 0.09));
+    const radius = parseFloat(s.borderRadius) || h / 2;
+    st.setProperty('--ytev-hl-inset', hlInset + 'px');
+    st.setProperty('--ytev-hl-radius', Math.max(4, Math.round(radius - hlInset)) + 'px');
     st.backdropFilter = s.backdropFilter && s.backdropFilter !== 'none' ? s.backdropFilter : '';
   }
 
@@ -459,10 +469,11 @@
     return free - SAFETY_GAP;
   }
 
-  // Ползунок занимает всю свободную ширину строки; по краям — постоянный
-  // зазор edgeGap. Если места мало, сначала убираем подпись с процентами,
-  // а если и это не помогло — прячем ползунок и возвращаем штатный
-  // (мини-плеер, узкое окно).
+  // Длина ползунка = настраиваемая доля ширины плеера, ограниченная
+  // свободным местом; по краям рамки — постоянный зазор edgeGap. Если
+  // места мало, сначала убираем подпись с процентами, а если и это не
+  // помогло — прячем ползунок и возвращаем штатный (мини-плеер, узкое
+  // окно).
   function layout() {
     if (!ui) return;
     // идёт анимация сворачивания — замеры бессмысленны, вернёмся тиком позже
@@ -501,7 +512,12 @@
       free = freeSpace(row);
     }
 
-    ui.slider.style.width = Math.round(Math.max(MIN_SLIDER, free)) + 'px';
+    // длина — настраиваемая доля ширины плеера, ограниченная свободным
+    // местом (защита от нечисловой настройки — старый формат записи)
+    const scale = num(SETTINGS.sliderScale) || 20;
+    const desired = player.clientWidth * (scale / 100);
+    ui.slider.style.width =
+      Math.round(Math.max(MIN_SLIDER, Math.min(desired, free))) + 'px';
 
     // подстраховка на случай неточного замера: если flex всё-таки сжал
     // ползунок до бесполезной длины — отдаём место штатному
