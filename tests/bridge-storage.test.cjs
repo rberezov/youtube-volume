@@ -8,6 +8,7 @@ const listeners = new Map();
 const posted = [];
 const saved = [];
 let localVolume = 0.37;
+let localMuted = false;
 
 const windowMock = {
   addEventListener(type, listener) {
@@ -28,11 +29,16 @@ const chromeMock = {
     },
     local: {
       get(defaults, callback) {
-        callback({ ...defaults, savedVolume: localVolume });
+        callback({
+          ...defaults,
+          savedVolume: localVolume,
+          savedMuted: localMuted,
+        });
       },
       set(value, callback) {
         saved.push(value);
-        localVolume = value.savedVolume;
+        if ('savedVolume' in value) localVolume = value.savedVolume;
+        if ('savedMuted' in value) localMuted = value.savedMuted;
         callback();
       },
     },
@@ -54,6 +60,7 @@ assert.equal(posted.length, 1);
 assert.equal(posted[0].type, 'YTEV_SETTINGS');
 assert.equal(posted[0].settings.gamma, 2.5);
 assert.equal(posted[0].state.savedVolume, 0.37);
+assert.equal(posted[0].state.savedMuted, false);
 
 const onMessage = listeners.get('message');
 assert.equal(typeof onMessage, 'function');
@@ -67,9 +74,22 @@ assert.equal(saved[0].savedVolume, 0.42);
 
 onMessage({
   source: windowMock,
+  data: { type: 'YTEV_SAVE_MUTED', muted: true },
+});
+assert.equal(saved.length, 2);
+assert.equal(saved[1].savedMuted, true);
+
+onMessage({
+  source: windowMock,
   data: { type: 'YTEV_SAVE_VOLUME', volume: 2 },
 });
-assert.equal(saved.length, 1);
+assert.equal(saved.length, 2);
+
+onMessage({
+  source: windowMock,
+  data: { type: 'YTEV_SAVE_MUTED', muted: 'yes' },
+});
+assert.equal(saved.length, 2);
 
 onMessage({
   source: windowMock,
@@ -77,5 +97,6 @@ onMessage({
 });
 assert.equal(posted.length, 2);
 assert.equal(posted[1].state.savedVolume, 0.42);
+assert.equal(posted[1].state.savedMuted, true);
 
 console.log('bridge storage smoke test passed');

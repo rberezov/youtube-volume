@@ -46,6 +46,7 @@
 
   const mediaProto = HTMLMediaElement.prototype;
   const nativeDesc = Object.getOwnPropertyDescriptor(mediaProto, 'volume');
+  const nativeMutedDesc = Object.getOwnPropertyDescriptor(mediaProto, 'muted');
   const logicalVolume = new WeakMap();
 
   const toReal = (v) => (SETTINGS.enabled ? Math.pow(v, SETTINGS.gamma) : v);
@@ -80,6 +81,29 @@
     },
   });
 
+  Object.defineProperty(mediaProto, 'muted', {
+    configurable: true,
+    enumerable: nativeMutedDesc.enumerable,
+    get() {
+      return nativeMutedDesc.get.call(this);
+    },
+    set(value) {
+      const requested = !!value;
+      // В кастомном режиме сохранённое состояние — источник истины.
+      // Shorts при запуске успевает выставить autoplay-mute до события
+      // playing; подавляем эту запись прямо в сеттере, без одного кадра
+      // с неправильным значком. Кнопка и клавиша M заранее обновляют
+      // preferredMuted, поэтому осознанное действие пользователя проходит.
+      const target =
+        !SETTINGS.useNativeSlider &&
+        this === getVideo() &&
+        typeof preferredMuted === 'boolean'
+          ? preferredMuted
+          : requested;
+      nativeMutedDesc.set.call(this, target);
+    },
+  });
+
   const logicalOf = (el) =>
     logicalVolume.has(el) ? logicalVolume.get(el) : nativeDesc.get.call(el);
 
@@ -94,11 +118,41 @@
 
   const VOLUME_EPSILON = 0.0005;
   let preferredVolume = null;
+  let preferredMuted = null;
   let volumeStateLoaded = false;
   let preferredVolumeDirty = false;
+  let preferredMutedDirty = false;
   let saveVolumeTimer = 0;
+  let saveMutedTimer = 0;
+  const STATE_CACHE_KEY = 'ytev-volume-state-v1';
   const validVolume = (value) =>
     Number.isFinite(value) && value >= 0 && value <= 1;
+
+  function cachePreferredState() {
+    try {
+      localStorage.setItem(
+        STATE_CACHE_KEY,
+        JSON.stringify({
+          volume: validVolume(preferredVolume) ? preferredVolume : null,
+          muted: typeof preferredMuted === 'boolean' ? preferredMuted : null,
+        })
+      );
+    } catch {}
+  }
+
+  // Синхронный кэш нужен только для самого первого кадра новой страницы.
+  // chrome.storage остаётся источником истины и перезапишет кэш, когда
+  // bridge пришлёт актуальное состояние.
+  try {
+    const cached = JSON.parse(localStorage.getItem(STATE_CACHE_KEY) || 'null');
+    const cachedVolume = Number(cached && cached.volume);
+    if (cached && cached.volume != null && validVolume(cachedVolume)) {
+      preferredVolume = cachedVolume;
+    }
+    if (cached && typeof cached.muted === 'boolean') {
+      preferredMuted = cached.muted;
+    }
+  } catch {}
 
   function rememberVolume(value, persist = false) {
     const volume = Number(value);
@@ -106,11 +160,51 @@
     preferredVolume = volume;
     if (!persist) return;
     preferredVolumeDirty = true;
+    cachePreferredState();
     clearTimeout(saveVolumeTimer);
     saveVolumeTimer = setTimeout(() => {
       window.postMessage({ type: 'YTEV_SAVE_VOLUME', volume }, '*');
     }, 250);
   }
+
+  function rememberMuted(value, persist = false) {
+    const muted = !!value;
+    preferredMuted = muted;
+    if (!persist) return;
+    preferredMutedDirty = true;
+    cachePreferredState();
+    clearTimeout(saveMutedTimer);
+    saveMutedTimer = setTimeout(() => {
+      window.postMessage({ type: 'YTEV_SAVE_MUTED', muted }, '*');
+    }, 250);
+  }
+
+  window.addEventListener(
+    'keydown',
+    (e) => {
+      if (
+        e.defaultPrevented ||
+        e.ctrlKey ||
+        e.metaKey ||
+        e.altKey ||
+        String(e.key).toLowerCase() !== 'm'
+      ) {
+        return;
+      }
+      const target = e.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+      const video = getVideo();
+      if (video) rememberMuted(!video.muted, true);
+    },
+    true
+  );
 
   function restorePreferredVolume(video) {
     if (!video || !validVolume(preferredVolume)) return false;
@@ -120,6 +214,22 @@
       return true;
     }
     return false;
+  }
+
+  function restorePreferredState(video) {
+    if (!video) return false;
+    let changed = restorePreferredVolume(video);
+    if (typeof preferredMuted !== 'boolean' || video.muted === preferredMuted) {
+      return changed;
+    }
+    const player = getPlayer();
+    if (player) {
+      const method = preferredMuted ? 'mute' : 'unMute';
+      if (typeof player[method] === 'function') player[method]();
+    }
+    video.muted = preferredMuted;
+    changed = true;
+    return changed;
   }
 
   /* ------------------------------------------------------------------ *
@@ -337,10 +447,20 @@
       if (!preferredVolumeDirty && savedValue != null && validVolume(savedVolume)) {
         preferredVolume = savedVolume;
       }
+      if (!preferredMutedDirty) {
+        if (typeof e.data.state.savedMuted === 'boolean') {
+          preferredMuted = e.data.state.savedMuted;
+        } else if (savedValue != null && validVolume(savedVolume)) {
+          // Версии до 1.12.6 сохраняли только уровень. Не наследуем
+          // случайный autoplay-mute YouTube при первом запуске новой страницы.
+          preferredMuted = false;
+        }
+      }
       volumeStateLoaded = true;
+      cachePreferredState();
     }
     reapplyCurve();
-    restorePreferredVolume(getVideo());
+    restorePreferredState(getVideo());
     ensureUI(); // включение/выключение своей шкалы должно срабатывать сразу
     layout();
     updateUI();
@@ -1078,7 +1198,7 @@
     if (!validVolume(preferredVolume) && validVolume(current)) {
       rememberVolume(current);
     } else {
-      restorePreferredVolume(video);
+      restorePreferredState(video);
     }
     video.addEventListener('volumechange', () => {
       if (video !== boundVideo) return;
@@ -1088,6 +1208,7 @@
       if (SETTINGS.useNativeSlider) {
         const value = Number(logicalOf(video));
         if (validVolume(value)) rememberVolume(value, true);
+        rememberMuted(video.muted, true);
       } else {
         restorePreferredVolume(video);
       }
@@ -1096,7 +1217,7 @@
     const restoreAfterMediaChange = () => {
       setTimeout(() => {
         if (video !== getVideo()) return;
-        restorePreferredVolume(video);
+        restorePreferredState(video);
         updateUI();
       }, 0);
     };
@@ -1428,6 +1549,10 @@
   }
 
   function ensureUI() {
+    // Не рисуем значок из временного autoplay-состояния YouTube. Обычно
+    // bridge отвечает ещё до появления плеера; синхронный кэш выше при
+    // повторных открытиях позволяет применить mute ещё раньше.
+    if (!volumeStateLoaded) return;
     // режим «штатная шкала»: свой блок не строим, но кривая продолжает
     // работать — её применяет перехватчик громкости
     if (SETTINGS.useNativeSlider) {
@@ -1482,9 +1607,11 @@
       const video = getVideo();
       if (!video) return;
       if (video.muted || video.volume === 0) {
+        rememberMuted(false, true);
         if (player && typeof player.unMute === 'function') player.unMute();
         video.muted = false;
       } else {
+        rememberMuted(true, true);
         if (player && typeof player.mute === 'function') player.mute();
         else video.muted = true;
       }
@@ -1575,10 +1702,12 @@
     const player = getPlayer();
     if (!video || !slider) return;
     const pct = Math.min(100, Math.max(0, Number(slider.value)));
+    if (pct > 0) rememberMuted(false, true);
     if (video.muted && pct > 0) {
       if (player && typeof player.unMute === 'function') player.unMute();
       video.muted = false;
     }
+    if (pct === 0) rememberMuted(video.muted, true);
     rememberVolume(pct / 100, true);
     video.volume = pct / 100;
     clearTimeout(persistTimer);

@@ -35,7 +35,7 @@
     try {
       chrome.storage.sync.get(DEFAULTS, (settings) => {
         if (chrome.runtime.lastError) return;
-        chrome.storage.local.get({ savedVolume: null }, (state) => {
+        chrome.storage.local.get({ savedVolume: null, savedMuted: null }, (state) => {
           if (chrome.runtime.lastError) return;
           send(settings, state);
         });
@@ -55,6 +55,16 @@
       if (!Number.isFinite(volume) || volume < 0 || volume > 1 || !alive()) return;
       try {
         chrome.storage.local.set({ savedVolume: volume }, () => void chrome.runtime.lastError);
+      } catch {}
+      return;
+    }
+    if (e.data.type === 'YTEV_SAVE_MUTED') {
+      if (typeof e.data.muted !== 'boolean' || !alive()) return;
+      try {
+        chrome.storage.local.set(
+          { savedMuted: e.data.muted },
+          () => void chrome.runtime.lastError
+        );
       } catch {}
     }
   });
