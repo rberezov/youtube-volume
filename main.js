@@ -45,17 +45,167 @@
         return;
       }
       logicalVolume.set(this, v);
-      setRealSmooth(this, toReal(v));
+      applyReal(this, toReal(v));
     },
   });
 
-  // Плавная подводка фактической громкости. Мгновенный скачок уровня —
-  // это разрыв формы волны, который слышен как щелчок/треск; с кривой
-  // шаги наверху шкалы ещё и втрое крупнее. Поэтому любое изменение
-  // реального значения растягивается на ~100мс мелкими шагами
-  // (экспоненциальное приближение к цели). Новая цель во время подводки
-  // просто подменяет старую — перетаскивание превращается в одно
-  // непрерывное скольжение уровня без ступенек.
+  const logicalOf = (el) =>
+    logicalVolume.has(el) ? logicalVolume.get(el) : nativeDesc.get.call(el);
+
+  /* ------------------------------------------------------------------ *
+   * 1a. Регулировка через Web Audio — главное средство против треска
+   *
+   * Запись в video.volume из JS принципиально ступенчата: значение
+   * применяется на границах аудиобуферов, поэтому быстрые изменения
+   * дают «zipper noise» (треск), а экспоненциальная кривая ещё и
+   * утраивает шаг в верхней части шкалы. GainNode автоматизирует
+   * усиление в аудиопотоке с частотой дискретизации: setTargetAtTime с
+   * постоянной времени 15мс воспринимается мгновенным, но щелчков не
+   * даёт вовсе.
+   *
+   * Ограничения Web Audio, которые здесь обойдены:
+   *  - DRM (EME): createMediaElementSource на защищённом потоке даёт
+   *    тишину — такие элементы не подключаем (mediaKeys / событие
+   *    encrypted);
+   *  - приостановленный AudioContext (политика автовоспроизведения):
+   *    подключаемся только когда контекст реально работает;
+   *  - подключение необратимо, поэтому есть сторож тишины: если через
+   *    граф ничего не идёт, возвращаемся к прямой записи громкости.
+   * ------------------------------------------------------------------ */
+
+  const audio = { ctx: null, failed: false, nodes: new WeakMap() };
+  const drmElements = new WeakSet();
+
+  document.addEventListener(
+    'encrypted',
+    (e) => {
+      if (e.target instanceof HTMLMediaElement) drmElements.add(e.target);
+    },
+    true
+  );
+
+  function audioGraph(el) {
+    if (audio.failed || !(el instanceof HTMLMediaElement)) return null;
+    const existing = audio.nodes.get(el);
+    if (existing) return existing;
+    if (drmElements.has(el) || el.mediaKeys) return null; // защищённый поток
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    try {
+      if (!audio.ctx) audio.ctx = new Ctx();
+    } catch {
+      audio.failed = true;
+      return null;
+    }
+    if (audio.ctx.state === 'suspended') {
+      audio.ctx.resume().catch(() => {});
+    }
+    // пока контекст не запущен, звук через граф не пойдёт — ждём
+    if (audio.ctx.state !== 'running') return null;
+    try {
+      const src = audio.ctx.createMediaElementSource(el);
+      const gain = audio.ctx.createGain();
+      gain.gain.value = toReal(logicalOf(el));
+      src.connect(gain).connect(audio.ctx.destination);
+      const node = { src, gain, target: gain.gain.value };
+      audio.nodes.set(el, node);
+      // уровень задаёт gain, сам элемент держим на максимуме
+      nativeDesc.set.call(el, 1);
+      el.addEventListener('volumechange', () => applyReal(el, toReal(logicalOf(el))));
+      watchSilence(el, node);
+      return node;
+    } catch {
+      audio.failed = true;
+      return null;
+    }
+  }
+
+  // Сторож: если через граф идёт ровно ноль при играющем незаглушённом
+  // видео — значит подключение не работает (например, неожиданный DRM).
+  // Тогда снимаем усиление и возвращаемся к прямой записи громкости.
+  function watchSilence(el, node) {
+    const ctx = audio.ctx;
+    let analyser;
+    try {
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      node.gain.connect(analyser);
+    } catch {
+      return;
+    }
+    const buf = new Uint8Array(analyser.fftSize);
+    let silentFor = 0;
+    let lastTime = -1;
+    let ticks = 0;
+    const timer = setInterval(() => {
+      if (!el.isConnected || audio.failed || ++ticks > 240) {
+        clearInterval(timer); // элемент ушёл, откат уже был или прошло 2 минуты
+        return;
+      }
+      const playing = !el.paused && !el.muted && el.currentTime !== lastTime;
+      lastTime = el.currentTime;
+      if (!playing || node.target < 0.01) {
+        silentFor = 0;
+        return;
+      }
+      analyser.getByteTimeDomainData(buf);
+      const silent = buf.every((v) => v === 128); // 128 — цифровая тишина
+      silentFor = silent ? silentFor + 500 : 0;
+      if (silentFor >= 2000) {
+        clearInterval(timer);
+        fallbackToDirect(el, node);
+      } else if (!silent && silentFor === 0 && lastTime > 3) {
+        clearInterval(timer); // звук идёт — сторож больше не нужен
+      }
+    }, 500);
+  }
+
+  function fallbackToDirect(el, node) {
+    audio.failed = true;
+    audio.nodes.delete(el);
+    try {
+      node.gain.disconnect();
+      node.src.connect(audio.ctx.destination);
+    } catch {}
+    nativeDesc.set.call(el, Math.min(1, Math.max(0, node.target)));
+  }
+
+  // Основной путь установки фактической громкости
+  function applyReal(el, real) {
+    const node = audioGraph(el);
+    if (node) {
+      const target = el.muted ? 0 : real;
+      node.target = target;
+      // 15мс — «мгновенно на слух», но без щелчка
+      node.gain.gain.setTargetAtTime(target, audio.ctx.currentTime, 0.015);
+      if (nativeDesc.get.call(el) !== 1) nativeDesc.set.call(el, 1);
+      return;
+    }
+    setRealSmooth(el, real);
+  }
+
+  // Контекст можно запустить только после жеста пользователя, поэтому
+  // пробуем подключиться на любом взаимодействии и при старте
+  // воспроизведения; до этого работает запасной путь
+  let lastEngage = 0;
+  function engageAudio() {
+    if (audio.failed) return;
+    const now = Date.now();
+    if (now - lastEngage < 400) return; // не дёргаем на каждое нажатие клавиши
+    lastEngage = now;
+    if (audio.ctx && audio.ctx.state === 'suspended') {
+      audio.ctx.resume().catch(() => {});
+    }
+    document.querySelectorAll('video, audio').forEach((el) => {
+      if (!el.paused) audioGraph(el);
+    });
+  }
+  for (const type of ['pointerdown', 'keydown', 'playing']) {
+    document.addEventListener(type, engageAudio, true);
+  }
+
+  // Запасной путь (Web Audio недоступен): подводка таймером — грубее,
+  // чем автоматизация в аудиопотоке, но лучше мгновенного скачка
   const ramps = new WeakMap();
   function setRealSmooth(el, target) {
     let st = ramps.get(el);
@@ -100,9 +250,7 @@
   // пропускает элементы, у которых фактическое значение не меняется
   function reapplyCurve() {
     document.querySelectorAll('video, audio').forEach((el) => {
-      if (logicalVolume.has(el)) {
-        setRealSmooth(el, toReal(logicalVolume.get(el)));
-      }
+      if (logicalVolume.has(el)) applyReal(el, toReal(logicalVolume.get(el)));
     });
   }
 
@@ -187,24 +335,15 @@
     }
     .ytev-box:not(.ytev-framed) .ytev-mute { height: 36px; }
     .ytev-mute svg { width: 100%; height: 100%; display: block; }
-    /* состояния значка как у YouTube: тихо — без волн, до 50% — одна
-       волна, громче — две, выключен — перечёркнут; волны плавно
-       появляются/уходят от «рупора» */
-    .ytev-i-w1, .ytev-i-w2 {
-      opacity: 0;
-      transform: scale(.4);
-      transform-box: fill-box;
-      transform-origin: left center;
-      transition: opacity .18s ease, transform .18s ease;
+    /* заливка и тень-обводка значка — те же, что у .ytp-svg-fill и
+       .ytp-svg-shadow в плеере YouTube */
+    .ytev-icon-fill { fill: currentColor; }
+    .ytev-icon-shadow {
+      fill: none;
+      stroke: #000;
+      stroke-opacity: .15;
+      stroke-width: 2px;
     }
-    .ytev-i-off {
-      opacity: 0;
-      transition: opacity .15s ease;
-    }
-    .ytev-box[data-vol="low"] .ytev-i-w1 { opacity: 1; transform: none; }
-    .ytev-box[data-vol="high"] .ytev-i-w1,
-    .ytev-box[data-vol="high"] .ytev-i-w2 { opacity: 1; transform: none; }
-    .ytev-box[data-vol="muted"] .ytev-i-off { opacity: 1; }
     /* автосворачивание: без курсора остаётся только кнопка; переходы
        включаются лишь на время переключения (.ytev-animating), чтобы
        не мешать замерам layout() */
@@ -318,14 +457,123 @@
     ui.label.textContent = fmt(pct);
     const muted = video.muted || pct === 0;
     ui.box.classList.toggle('ytev-muted', muted);
-    ui.box.dataset.vol = muted ? 'muted' : pct < 50 ? 'low' : 'high';
+    const state = muted ? 'muted' : pct < 50 ? 'low' : 'high';
+    ui.box.dataset.vol = state;
     if (ui.muteBtn) {
       ui.muteBtn.title = muted ? 'Включить звук (m)' : 'Отключить звук (m)';
+      updateIcon(state);
     }
     const real = toReal(pct / 100) * 100;
     ui.slider.title = SETTINGS.enabled
       ? `Громкость: ${fmt(pct)} (на выходе ≈ ${fmt(real)})`
       : `Громкость: ${fmt(pct)}`;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Значок кнопки звука
+   *
+   * Основной путь — клонировать SVG прямо из штатной (скрытой) кнопки
+   * плеера: дизайн совпадает с точностью до пикселя, включая
+   * тень-обводку, и переживёт обновления интерфейса YouTube. Если
+   * штатный значок не отражает состояние (одинаковый рисунок при
+   * включённом и выключенном звуке — YouTube не обновляет скрытую
+   * кнопку), переходим на встроенную копию с оригинальными путями
+   * плеера.
+   * ------------------------------------------------------------------ */
+
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const XLINK_NS = 'http://www.w3.org/1999/xlink';
+  // оригинальные пути значка громкости YouTube (viewBox 36×36)
+  const ICON = {
+    horn: 'M8,21 L12,21 L17,26 L17,10 L12,15 L8,15 L8,21 Z',
+    wave1:
+      'M19,14 L19,22 C20.48,21.32 21.5,19.77 21.5,18 C21.5,16.26 20.48,14.74 19,14 Z',
+    wave2:
+      'M19,11.29 C21.89,12.15 24,14.83 24,18 C24,21.17 21.89,23.85 19,24.71 L19,26.77 C23.01,25.86 26,22.28 26,18 C26,13.72 23.01,10.14 19,9.23 L19,11.29 Z',
+    muted:
+      'M21.48,17.98 c0,-1.77 -1.02,-3.29 -2.5,-4.03 v2.21 l2.45,2.45 c.03,-.2 .05,-.41 .05,-.63 z m2.5,0 c0,.94 -.2,1.82 -.54,2.64 l1.51,1.51 c.66,-1.24 1.03,-2.65 1.03,-4.15 0,-4.28 -2.99,-7.86 -7,-8.76 v2.05 c2.89,.86 5,3.54 5,6.71 z M9.25,8.98 L7.98,10.24 l4.72,4.73 H7.98 v6 H11.98 l5,5 v-6.73 l4.25,4.25 c-.67,.52 -1.42,.93 -2.25,1.18 v2.06 c1.38,-.31 2.63,-.95 3.69,-1.81 l2.04,2.05 1.27,-1.27 -9,-9 -7.72,-7.72 z',
+  };
+
+  let cloneUnreliable = false;
+  let clonedSig = '';
+  let sigMuted = '';
+  let sigLoud = '';
+  let idSeq = 0;
+
+  const iconSignature = (svg) =>
+    [...svg.querySelectorAll('path')].map((p) => p.getAttribute('d') || '').join('|');
+
+  function cloneNativeIcon(native) {
+    const copy = native.cloneNode(true);
+    copy.setAttribute('width', '100%');
+    copy.setAttribute('height', '100%');
+    copy.style.pointerEvents = 'none';
+    // переименовываем id: дубликаты с оригиналом ломают ссылки <use>
+    const renamed = new Map();
+    for (const el of copy.querySelectorAll('[id]')) {
+      const fresh = 'ytev-icon-' + idSeq++;
+      renamed.set('#' + el.id, '#' + fresh);
+      el.id = fresh;
+    }
+    for (const use of copy.querySelectorAll('use')) {
+      const href = use.getAttribute('href');
+      const xhref = use.getAttributeNS(XLINK_NS, 'href');
+      if (href && renamed.has(href)) use.setAttribute('href', renamed.get(href));
+      if (xhref && renamed.has(xhref)) {
+        use.setAttributeNS(XLINK_NS, 'href', renamed.get(xhref));
+      }
+    }
+    ui.muteBtn.replaceChildren(copy);
+  }
+
+  function buildOwnIcon(state) {
+    let svg = ui.muteBtn.querySelector('svg.ytev-icon');
+    if (!svg) {
+      svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('class', 'ytev-icon');
+      svg.setAttribute('viewBox', '0 0 36 36');
+      svg.setAttribute('width', '100%');
+      svg.setAttribute('height', '100%');
+      svg.setAttribute('aria-hidden', 'true');
+      for (const cls of ['ytev-icon-shadow', 'ytev-icon-fill']) {
+        const path = document.createElementNS(SVG_NS, 'path');
+        path.setAttribute('class', cls);
+        svg.appendChild(path);
+      }
+      ui.muteBtn.replaceChildren(svg);
+    }
+    const d =
+      state === 'muted'
+        ? ICON.muted
+        : state === 'low'
+          ? ICON.horn + ' ' + ICON.wave1
+          : ICON.horn + ' ' + ICON.wave1 + ' ' + ICON.wave2;
+    for (const path of svg.children) path.setAttribute('d', d);
+  }
+
+  function updateIcon(state) {
+    if (!ui || !ui.muteBtn) return;
+    const player = getPlayer();
+    const native = player && player.querySelector('.ytp-mute-button svg');
+    if (native && !cloneUnreliable) {
+      const sig = iconSignature(native);
+      if (sig) {
+        // проверка на «застывший» штатный значок: если при выключенном и
+        // включённом звуке рисунок один и тот же — копировать нельзя
+        if (state === 'muted') sigMuted = sig;
+        else sigLoud = sig;
+        if (sigMuted && sigLoud && sigMuted === sigLoud) {
+          cloneUnreliable = true;
+        } else {
+          if (sig !== clonedSig) {
+            clonedSig = sig;
+            cloneNativeIcon(native);
+          }
+          return;
+        }
+      }
+    }
+    buildOwnIcon(state);
   }
 
   const num = (v) => parseFloat(v) || 0;
@@ -657,33 +905,10 @@
     box.className = 'ytev-box';
 
     // Своя кнопка звука: значок предсказуемо центрирован при любом
-    // размере. SVG строится через DOM API — на youtube.com действует
-    // Trusted Types CSP, и присваивание строки в innerHTML бросает
-    // исключение.
+    // размере, а рисунок берётся у самого YouTube (см. updateIcon)
     const muteBtn = document.createElement('button');
     muteBtn.className = 'ytev-mute';
     muteBtn.type = 'button';
-    {
-      // оригинальные пути значка громкости из плеера YouTube (36×36)
-      const NS = 'http://www.w3.org/2000/svg';
-      const svg = document.createElementNS(NS, 'svg');
-      svg.setAttribute('viewBox', '0 0 36 36');
-      svg.setAttribute('fill', 'currentColor');
-      svg.setAttribute('aria-hidden', 'true');
-      const paths = [
-        ['', 'M8,21 L12,21 L17,26 L17,10 L12,15 L8,15 L8,21 Z'],
-        ['ytev-i-w1', 'M19,14 L19,22 C20.48,21.32 21.5,19.77 21.5,18 C21.5,16.26 20.48,14.74 19,14 Z'],
-        ['ytev-i-w2', 'M19,11.29 C21.89,12.15 24,14.83 24,18 C24,21.17 21.89,23.85 19,24.71 L19,26.77 C23.01,25.86 26,22.28 26,18 C26,13.72 23.01,10.14 19,9.23 L19,11.29 Z'],
-        ['ytev-i-off', 'M9.25,9 L7.98,10.27 L24.71,27 L25.98,25.73 L9.25,9 Z'],
-      ];
-      for (const [cls, d] of paths) {
-        const path = document.createElementNS(NS, 'path');
-        if (cls) path.setAttribute('class', cls);
-        path.setAttribute('d', d);
-        svg.appendChild(path);
-      }
-      muteBtn.appendChild(svg);
-    }
     muteBtn.addEventListener('click', () => {
       const player = getPlayer();
       const video = getVideo();
