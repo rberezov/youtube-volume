@@ -6,10 +6,19 @@ const vm = require('node:vm');
 
 const listeners = new Map();
 const posted = [];
+const runtimeMessages = [];
 const saved = [];
 let localVolume = 0.37;
 let localMuted = false;
 let now = 1000;
+let onStorageChanged;
+const activeVideo = { muted: false, volume: 0.55 };
+
+const documentMock = {
+  querySelector(selector) {
+    return selector.includes('video') ? activeVideo : null;
+  },
+};
 
 const windowMock = {
   addEventListener(type, listener) {
@@ -21,26 +30,16 @@ const windowMock = {
 };
 
 const chromeMock = {
-  runtime: { id: 'test-extension', lastError: null },
-  storage: {
-    sync: {
-      get(defaults, callback) {
-        callback({
-          ...defaults,
-          enabled: 'invalid',
-          gamma: 2.5,
-          shortsScale: 999,
-        });
-      },
+  runtime: {
+    id: 'test-extension',
+    lastError: null,
+    sendMessage(message, callback) {
+      runtimeMessages.push(message);
+      callback({ ok: true });
     },
+  },
+  storage: {
     local: {
-      get(defaults, callback) {
-        callback({
-          ...defaults,
-          savedVolume: localVolume,
-          savedMuted: localMuted,
-        });
-      },
       set(value, callback) {
         saved.push(value);
         if ('savedVolume' in value) localVolume = value.savedVolume;
@@ -49,7 +48,9 @@ const chromeMock = {
       },
     },
     onChanged: {
-      addListener() {},
+      addListener(listener) {
+        onStorageChanged = listener;
+      },
     },
   },
 };
@@ -57,7 +58,16 @@ const chromeMock = {
 const context = vm.createContext({
   chrome: chromeMock,
   clearTimeout() {},
+  crypto: {
+    getRandomValues(values) {
+      for (let index = 0; index < values.length; index += 1) {
+        values[index] = index + 1;
+      }
+      return values;
+    },
+  },
   Date: { now: () => now },
+  document: documentMock,
   location: { origin: 'https://www.youtube.com' },
   window: windowMock,
   setTimeout(callback) {
@@ -68,33 +78,21 @@ const context = vm.createContext({
 const source = fs.readFileSync(require.resolve('../bridge.js'), 'utf8');
 vm.runInContext(source, context, { filename: 'bridge.js' });
 
-assert.equal(posted.length, 0, 'bridge must not expose settings before a channel is bound');
-
 const onMessage = listeners.get('message');
 assert.equal(typeof onMessage, 'function');
-const channel = '0123456789abcdef0123456789abcdef';
+assert.equal(runtimeMessages.length, 1);
+assert.equal(runtimeMessages[0].type, 'YTEV_INIT');
+const channel = runtimeMessages[0].channel;
+assert.match(channel, /^[a-f0-9]{32}$/);
+assert.match(runtimeMessages[0].secret, /^[a-f0-9]{64}$/);
+assert.equal(posted.length, 0, 'bridge must never expose settings to the page');
 
 onMessage({
   source: windowMock,
   origin: 'https://evil.example',
-  data: { type: 'YTEV_GET_SETTINGS', channel },
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 0.42 },
 });
-assert.equal(posted.length, 0, 'messages from another origin must be ignored');
-
-onMessage({
-  source: windowMock,
-  origin: 'https://www.youtube.com',
-  data: { type: 'YTEV_GET_SETTINGS', channel },
-});
-assert.equal(posted.length, 1);
-assert.equal(posted[0].type, 'YTEV_SETTINGS');
-assert.equal(posted[0].channel, channel);
-assert.equal(posted[0].targetOrigin, 'https://www.youtube.com');
-assert.equal(posted[0].settings.gamma, 2.5);
-assert.equal(posted[0].settings.enabled, true);
-assert.equal(posted[0].settings.shortsScale, 70);
-assert.equal(posted[0].state.savedVolume, 0.37);
-assert.equal(posted[0].state.savedMuted, false);
+assert.equal(saved.length, 0, 'messages from another origin must be ignored');
 
 onMessage({
   source: windowMock,
@@ -182,6 +180,7 @@ assert.equal(saved[1].savedMuted, true);
 now += 300;
 const ownSlider = {
   tagName: 'INPUT',
+  value: '55',
   matches(selector) {
     return selector === '.ytev-slider';
   },
@@ -193,6 +192,21 @@ listeners.get('input')({
   isTrusted: true,
   target: ownSlider,
 });
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_MUTED', channel, muted: true },
+});
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 0.99 },
+});
+assert.equal(
+  saved.length,
+  2,
+  'forged values must not consume or reuse a trusted slider intent'
+);
 onMessage({
   source: windowMock,
   origin: 'https://www.youtube.com',
@@ -232,6 +246,7 @@ assert.equal(saved.length, 5, 'Enter on the mute button must authorize mute');
 assert.equal(saved[4].savedMuted, true);
 
 now += 300;
+activeVideo.muted = true;
 listeners.get('click')({
   isTrusted: true,
   target: {
@@ -277,14 +292,11 @@ onMessage({
 });
 assert.equal(saved.length, 6);
 
-now += 600;
-onMessage({
-  source: windowMock,
-  origin: 'https://www.youtube.com',
-  data: { type: 'YTEV_GET_SETTINGS', channel },
-});
-assert.equal(posted.length, 2);
-assert.equal(posted[1].state.savedVolume, 0.55);
-assert.equal(posted[1].state.savedMuted, false);
+onStorageChanged({ gamma: { newValue: 2.5 } }, 'sync');
+assert.equal(runtimeMessages.length, 2);
+assert.equal(runtimeMessages[1].type, 'YTEV_UPDATE_SETTINGS');
+assert.equal(runtimeMessages[1].channel, channel);
+assert.equal(runtimeMessages[1].secret, runtimeMessages[0].secret);
+assert.equal(posted.length, 0, 'settings updates must stay outside window messaging');
 
 console.log('bridge storage smoke test passed');

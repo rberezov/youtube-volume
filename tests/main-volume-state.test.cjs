@@ -201,36 +201,33 @@ windowMock.window = windowMock;
 
 const source = fs.readFileSync(require.resolve('../main.js'), 'utf8');
 vm.runInContext(source, context, { filename: 'main.js' });
-
-const onMessage = windowListeners.get('message')[0];
-const initialRequest = posted.find((message) => message.type === 'YTEV_GET_SETTINGS');
-const channel = initialRequest.channel;
-assert.match(channel, /^[a-f0-9]{32}$/);
-assert.equal(initialRequest.targetOrigin, 'https://www.youtube.com');
-
-onMessage({
-  source: windowMock,
-  origin: 'https://www.youtube.com',
-  data: {
-    type: 'YTEV_SETTINGS',
-    channel: '00000000000000000000000000000000',
-    settings: { useNativeSlider: true },
-    state: { savedVolume: 0.9, savedMuted: true },
-  },
-});
-assert.equal(videoA.volume, 0.2, 'a forged settings channel must be ignored');
-
-onMessage({
-  source: windowMock,
-  origin: 'https://www.youtube.com',
-  data: {
-    type: 'YTEV_SETTINGS',
-    channel,
-    settings: { useNativeSlider: true },
-    state: { savedVolume: 0.4, savedMuted: false },
-  },
-});
+const channel = '0123456789abcdef0123456789abcdef';
+const secret = '0123456789abcdef'.repeat(4);
+assert.equal(
+  context.youtubeVolumeMain(
+    {
+      channel,
+      settings: { useNativeSlider: true },
+      state: { savedVolume: 0.4, savedMuted: false },
+    },
+    secret
+  ),
+  true
+);
 assert.equal(videoA.volume, 0.4, 'saved volume should be restored on first bind');
+assert.equal(
+  windowListeners.has('message'),
+  false,
+  'MAIN world must not accept settings through page-visible messages'
+);
+
+const instance = windowMock[Symbol.for('ytev.main.instance.v2')];
+assert.equal(instance.version, 2);
+assert.equal(
+  instance.update('f'.repeat(64), { settings: { enabled: false } }),
+  false,
+  'an update without the isolated-world secret must be rejected'
+);
 
 const onKeyDown = windowListeners.get('keydown')[0];
 onKeyDown({
@@ -244,16 +241,13 @@ onKeyDown({
 videoA.volume = 0.6;
 assert.equal(videoA.volume, 0.6, 'keyboard volume should become the preferred value');
 
-onMessage({
-  source: windowMock,
-  origin: 'https://www.youtube.com',
-  data: {
-    type: 'YTEV_SETTINGS',
-    channel,
+assert.equal(
+  instance.update(secret, {
     settings: { useNativeSlider: true },
     state: { savedVolume: 0.4, savedMuted: false },
-  },
-});
+  }),
+  true
+);
 assert.equal(videoA.volume, 0.6, 'repeated settings delivery must not restore stale state');
 
 clock = 5000;
