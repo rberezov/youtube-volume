@@ -18,10 +18,7 @@ function allowedSender(sender) {
   if (!sender || !sender.tab || !Number.isInteger(sender.tab.id)) return false;
   try {
     const url = new URL(sender.url || '');
-    return (
-      url.protocol === 'https:' &&
-      (url.hostname === 'www.youtube.com' || url.hostname === 'music.youtube.com')
-    );
+    return url.protocol === 'https:' && url.hostname === 'www.youtube.com';
   } catch {
     return false;
   }

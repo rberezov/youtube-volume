@@ -73,6 +73,17 @@ async function run() {
   assert.equal(invalidResponse, undefined);
   assert.equal(injections.length, 0);
 
+  assert.equal(
+    onMessage(
+      { type: 'YTEV_INIT', channel, secret },
+      { ...sender, url: 'https://music.youtube.com/watch/example' },
+      () => {}
+    ),
+    false,
+    'YouTube Music must stay outside the extension scope'
+  );
+  assert.equal(injections.length, 0);
+
   let initResponse;
   assert.equal(
     onMessage({ type: 'YTEV_INIT', channel, secret }, sender, (value) => {
@@ -114,10 +125,18 @@ async function run() {
   );
   assert.equal(manifest.background.service_worker, 'background.js');
   assert.ok(manifest.permissions.includes('scripting'));
+  assert.deepEqual(manifest.host_permissions, ['https://www.youtube.com/*']);
   assert.equal(
     manifest.content_scripts.some((entry) => entry.js.includes('main.js')),
     false,
     'main.js must only be injected with trusted executeScript arguments'
+  );
+  assert.equal(
+    manifest.content_scripts.some((entry) =>
+      entry.matches.includes('https://music.youtube.com/*')
+    ),
+    false,
+    'YouTube Music must not load any extension content script'
   );
 
   console.log('background trusted injection test passed');
