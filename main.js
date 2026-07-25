@@ -4,6 +4,18 @@
 (() => {
   'use strict';
 
+  const PAGE_ORIGIN = location.origin;
+  const CHANNEL_ID = Array.from(window.crypto.getRandomValues(new Uint8Array(16)), (v) =>
+    v.toString(16).padStart(2, '0')
+  ).join('');
+  const INSTANCE_KEY = Symbol.for('ytev.main.instance.v1');
+  if (window[INSTANCE_KEY]) return;
+  Object.defineProperty(window, INSTANCE_KEY, {
+    configurable: false,
+    enumerable: false,
+    value: true,
+  });
+
   const SETTINGS = {
     enabled: true,          // применять экспоненциальную кривую
     gamma: 3,               // крутизна кривой: real = logical^gamma (1 = линейно)
@@ -13,6 +25,23 @@
     autoCollapse: false,    // сворачивать шкалу, когда курсор не на ней
     useNativeSlider: false, // не строить свою шкалу — оставить штатную
   };
+
+  function applySettings(value) {
+    if (!value || typeof value !== 'object') return;
+    for (const key of ['enabled', 'showPercent', 'autoCollapse', 'useNativeSlider']) {
+      if (typeof value[key] === 'boolean') SETTINGS[key] = value[key];
+    }
+    const gamma = Number(value.gamma);
+    const sliderScale = Number(value.sliderScale);
+    const shortsScale = Number(value.shortsScale);
+    if (Number.isFinite(gamma)) SETTINGS.gamma = Math.min(6, Math.max(1, gamma));
+    if (Number.isFinite(sliderScale)) {
+      SETTINGS.sliderScale = Math.min(70, Math.max(2, sliderScale));
+    }
+    if (Number.isFinite(shortsScale)) {
+      SETTINGS.shortsScale = Math.min(70, Math.max(2, shortsScale));
+    }
+  }
 
   // Строка управления Shorts перехватывает bubbling/capture-события своих
   // дочерних контролов. Из-за этого нативный range визуально двигался, но
@@ -47,6 +76,16 @@
   const mediaProto = HTMLMediaElement.prototype;
   const nativeDesc = Object.getOwnPropertyDescriptor(mediaProto, 'volume');
   const nativeMutedDesc = Object.getOwnPropertyDescriptor(mediaProto, 'muted');
+  if (
+    !nativeDesc ||
+    typeof nativeDesc.get !== 'function' ||
+    typeof nativeDesc.set !== 'function' ||
+    !nativeMutedDesc ||
+    typeof nativeMutedDesc.get !== 'function' ||
+    typeof nativeMutedDesc.set !== 'function'
+  ) {
+    return;
+  }
   const logicalVolume = new WeakMap();
 
   const toReal = (v) => (SETTINGS.enabled ? Math.pow(v, SETTINGS.gamma) : v);
@@ -163,7 +202,10 @@
     cachePreferredState();
     clearTimeout(saveVolumeTimer);
     saveVolumeTimer = setTimeout(() => {
-      window.postMessage({ type: 'YTEV_SAVE_VOLUME', volume }, '*');
+      window.postMessage(
+        { type: 'YTEV_SAVE_VOLUME', channel: CHANNEL_ID, volume },
+        PAGE_ORIGIN
+      );
     }, 250);
   }
 
@@ -175,33 +217,89 @@
     cachePreferredState();
     clearTimeout(saveMutedTimer);
     saveMutedTimer = setTimeout(() => {
-      window.postMessage({ type: 'YTEV_SAVE_MUTED', muted }, '*');
+      window.postMessage(
+        { type: 'YTEV_SAVE_MUTED', channel: CHANNEL_ID, muted },
+        PAGE_ORIGIN
+      );
     }, 250);
   }
 
+  let volumeIntentUntil = 0;
+  let mutedIntentUntil = 0;
+  const markVolumeIntent = (duration = 1200) => {
+    volumeIntentUntil = Date.now() + duration;
+  };
+  const markMutedIntent = (duration = 1200) => {
+    mutedIntentUntil = Date.now() + duration;
+  };
+  const hasVolumeIntent = () => Date.now() <= volumeIntentUntil;
+  const hasMutedIntent = () => Date.now() <= mutedIntentUntil;
+  const isEditableTarget = (target) =>
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    (target instanceof HTMLElement && target.isContentEditable);
+
+  // Внешние способы управления YouTube тоже считаются осознанным выбором:
+  // стрелки/колесо и штатная шкала должны обновлять preferredVolume, а не
+  // выглядеть как очередной автоматический сброс при смене media.
   window.addEventListener(
     'keydown',
     (e) => {
-      if (
-        e.defaultPrevented ||
-        e.ctrlKey ||
-        e.metaKey ||
-        e.altKey ||
-        String(e.key).toLowerCase() !== 'm'
-      ) {
-        return;
-      }
+      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
       const target = e.target;
-      if (
-        target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        target instanceof HTMLSelectElement ||
-        (target instanceof HTMLElement && target.isContentEditable)
-      ) {
+      const isOwnSlider =
+        target instanceof HTMLInputElement && target.classList.contains('ytev-slider');
+      if (isEditableTarget(target)) {
+        if (isOwnSlider && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+          markVolumeIntent();
+        }
         return;
       }
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        markVolumeIntent();
+        return;
+      }
+      if (String(e.key).toLowerCase() !== 'm' || e.repeat) return;
+      markMutedIntent();
       const video = getVideo();
       if (video) rememberMuted(!video.muted, true);
+    },
+    true
+  );
+
+  window.addEventListener(
+    'wheel',
+    (e) => {
+      const player = getPlayer();
+      if (player && e.target instanceof Node && player.contains(e.target)) {
+        markVolumeIntent();
+      }
+    },
+    true
+  );
+
+  window.addEventListener(
+    'pointerdown',
+    (e) => {
+      const target = e.target instanceof Element ? e.target : null;
+      if (!target) return;
+      if (target.closest('.ytp-mute-button, .ytev-mute')) markMutedIntent(5000);
+      if (target.closest('.ytp-volume-area, .ytp-volume-panel, .ytev-slider')) {
+        markVolumeIntent(5000);
+      }
+    },
+    true
+  );
+
+  window.addEventListener(
+    'pointermove',
+    (e) => {
+      if (!(e.buttons & 1)) return;
+      const target = e.target instanceof Element ? e.target : null;
+      if (target && target.closest('.ytp-volume-area, .ytp-volume-panel, .ytev-slider')) {
+        markVolumeIntent(1500);
+      }
     },
     true
   );
@@ -253,7 +351,12 @@
    *    граф ничего не идёт, возвращаемся к прямой записи громкости.
    * ------------------------------------------------------------------ */
 
-  const audio = { ctx: null, failed: false, nodes: new WeakMap() };
+  const audio = {
+    ctx: null,
+    unavailable: false,
+    nodes: new WeakMap(),
+    failedElements: new WeakSet(),
+  };
   const drmElements = new WeakSet();
 
   document.addEventListener(
@@ -265,7 +368,13 @@
   );
 
   function audioGraph(el) {
-    if (audio.failed || !(el instanceof HTMLMediaElement)) return null;
+    if (
+      audio.unavailable ||
+      !(el instanceof HTMLMediaElement) ||
+      audio.failedElements.has(el)
+    ) {
+      return null;
+    }
     const existing = audio.nodes.get(el);
     if (existing) return existing;
     if (drmElements.has(el) || el.mediaKeys) return null; // защищённый поток
@@ -274,7 +383,7 @@
     try {
       if (!audio.ctx) audio.ctx = new Ctx();
     } catch {
-      audio.failed = true;
+      audio.unavailable = true;
       return null;
     }
     if (audio.ctx.state === 'suspended') {
@@ -295,7 +404,7 @@
       watchSilence(el, node);
       return node;
     } catch {
-      audio.failed = true;
+      audio.failedElements.add(el);
       return null;
     }
   }
@@ -317,9 +426,15 @@
     let silentFor = 0;
     let lastTime = -1;
     let ticks = 0;
+    const stop = () => {
+      clearInterval(timer);
+      try {
+        node.gain.disconnect(analyser);
+      } catch {}
+    };
     const timer = setInterval(() => {
-      if (!el.isConnected || audio.failed || ++ticks > 240) {
-        clearInterval(timer); // элемент ушёл, откат уже был или прошло 2 минуты
+      if (!el.isConnected || audio.failedElements.has(el) || ++ticks > 240) {
+        stop(); // элемент ушёл, откат уже был или прошло 2 минуты
         return;
       }
       const playing = !el.paused && !el.muted && el.currentTime !== lastTime;
@@ -331,17 +446,17 @@
       analyser.getByteTimeDomainData(buf);
       const silent = buf.every((v) => v === 128); // 128 — цифровая тишина
       silentFor = silent ? silentFor + 500 : 0;
-      if (silentFor >= 2000) {
-        clearInterval(timer);
+      if (silentFor >= 6000) {
+        stop();
         fallbackToDirect(el, node);
       } else if (!silent && silentFor === 0 && lastTime > 3) {
-        clearInterval(timer); // звук идёт — сторож больше не нужен
+        stop(); // звук идёт — сторож больше не нужен
       }
     }, 500);
   }
 
   function fallbackToDirect(el, node) {
-    audio.failed = true;
+    audio.failedElements.add(el);
     audio.nodes.delete(el);
     try {
       node.gain.disconnect();
@@ -369,7 +484,7 @@
   // воспроизведения; до этого работает запасной путь
   let lastEngage = 0;
   function engageAudio() {
-    if (audio.failed) return;
+    if (audio.unavailable) return;
     const now = Date.now();
     if (now - lastEngage < 400) return; // не дёргаем на каждое нажатие клавиши
     lastEngage = now;
@@ -438,18 +553,30 @@
    * 2. Настройки из popup (приходят через bridge.js, isolated world)
    * ------------------------------------------------------------------ */
 
+  let settingsReceived = false;
   window.addEventListener('message', (e) => {
-    if (e.source !== window || !e.data || e.data.type !== 'YTEV_SETTINGS') return;
-    Object.assign(SETTINGS, e.data.settings);
-    if (!volumeStateLoaded && e.data.state) {
-      const savedValue = e.data.state.savedVolume;
+    if (
+      e.source !== window ||
+      e.origin !== PAGE_ORIGIN ||
+      !e.data ||
+      e.data.type !== 'YTEV_SETTINGS' ||
+      e.data.channel !== CHANNEL_ID
+    ) {
+      return;
+    }
+    applySettings(e.data.settings);
+    settingsReceived = true;
+    if (!volumeStateLoaded) {
+      const state =
+        e.data.state && typeof e.data.state === 'object' ? e.data.state : {};
+      const savedValue = state.savedVolume;
       const savedVolume = Number(savedValue);
       if (!preferredVolumeDirty && savedValue != null && validVolume(savedVolume)) {
         preferredVolume = savedVolume;
       }
       if (!preferredMutedDirty) {
-        if (typeof e.data.state.savedMuted === 'boolean') {
-          preferredMuted = e.data.state.savedMuted;
+        if (typeof state.savedMuted === 'boolean') {
+          preferredMuted = state.savedMuted;
         } else if (savedValue != null && validVolume(savedVolume)) {
           // Версии до 1.12.6 сохраняли только уровень. Не наследуем
           // случайный autoplay-mute YouTube при первом запуске новой страницы.
@@ -460,13 +587,16 @@
       cachePreferredState();
     }
     reapplyCurve();
-    restorePreferredState(getVideo());
+    bindVideo();
     ensureUI(); // включение/выключение своей шкалы должно срабатывать сразу
     layout();
     updateUI();
     updateCollapsed();
   });
-  window.postMessage({ type: 'YTEV_GET_SETTINGS' }, '*');
+  window.postMessage(
+    { type: 'YTEV_GET_SETTINGS', channel: CHANNEL_ID },
+    PAGE_ORIGIN
+  );
 
   /* ------------------------------------------------------------------ *
    * 3. Длинный точный ползунок в панели плеера
@@ -725,6 +855,7 @@
   // { box, slider, label, muteBtn, hiddenPill }
   let ui = null;
   let boundVideo = null;
+  let videoBinding = null;
   let observedPlayer = null;
   let observedPill = null;
 
@@ -781,6 +912,7 @@
     if (!video) return;
     const pct = video.volume * 100; // логическая громкость
     ui.slider.value = pct;
+    ui.slider.setAttribute('aria-valuetext', fmt(pct));
     paint(pct);
     ui.label.textContent = fmt(pct);
     const muted = video.muted || pct === 0;
@@ -949,6 +1081,10 @@
   // фоновых плашек нет — блок остаётся прозрачным.
   function syncFrameStyle() {
     const player = getPlayer();
+    if (uiResizeObserver && observedPill && isShorts()) {
+      uiResizeObserver.unobserve(observedPill);
+      observedPill = null;
+    }
     // В Shorts копировать не с чего (плашек в плеере нет), поэтому рамку
     // задаём сами — тёмная «пилюля» в стиле кнопок YouTube, размеры от
     // ширины плеера, чтобы вписываться в любой размер окна
@@ -999,9 +1135,12 @@
     for (const sf of surfaces) {
       if (!surface || sf.h < surface.h) surface = sf;
     }
-    if (resizeObserver && surface && surface.el !== observedPill) {
-      resizeObserver.observe(surface.el); // плашка меняет высоту в big-mode
-      observedPill = surface.el;
+    if (uiResizeObserver && (!surface || surface.el !== observedPill)) {
+      if (observedPill) uiResizeObserver.unobserve(observedPill);
+      observedPill = surface ? surface.el : null;
+      if (observedPill) {
+        uiResizeObserver.observe(observedPill); // плашка меняет высоту в big-mode
+      }
     }
     const st = ui.box.style;
     ui.box.classList.toggle('ytev-framed', !!surface);
@@ -1190,9 +1329,21 @@
     }, 350);
   }
 
+  function unbindVideo() {
+    if (!videoBinding) return;
+    const { video, onVolumeChange, restoreAfterMediaChange } = videoBinding;
+    video.removeEventListener('volumechange', onVolumeChange);
+    video.removeEventListener('loadedmetadata', restoreAfterMediaChange);
+    video.removeEventListener('playing', restoreAfterMediaChange);
+    videoBinding = null;
+    boundVideo = null;
+  }
+
   function bindVideo() {
+    if (!volumeStateLoaded) return;
     const video = getVideo();
     if (!video || video === boundVideo) return;
+    unbindVideo();
     boundVideo = video;
     const current = Number(logicalOf(video));
     if (!validVolume(preferredVolume) && validVolume(current)) {
@@ -1200,20 +1351,27 @@
     } else {
       restorePreferredState(video);
     }
-    video.addEventListener('volumechange', () => {
+    const onVolumeChange = () => {
       if (video !== boundVideo) return;
-      // Свою шкалу считаем источником истины. YouTube иногда заново
-      // применяет громкость при подмене потока; возвращаем сохранённую.
-      // В режиме штатной шкалы, наоборот, запоминаем выбор пользователя.
-      if (SETTINGS.useNativeSlider) {
-        const value = Number(logicalOf(video));
-        if (validVolume(value)) rememberVolume(value, true);
-        rememberMuted(video.muted, true);
+      const value = Number(logicalOf(video));
+      // Осознанные стрелки, колесо и штатные контролы обновляют общий
+      // уровень. Записи без недавнего пользовательского ввода считаются
+      // служебным сбросом YouTube и не перетирают сохранённое значение.
+      if (hasVolumeIntent() && validVolume(value)) {
+        rememberVolume(value, true);
       } else {
         restorePreferredVolume(video);
       }
+      if (hasMutedIntent() || (SETTINGS.useNativeSlider && hasVolumeIntent())) {
+        rememberMuted(video.muted, true);
+      } else if (
+        typeof preferredMuted === 'boolean' &&
+        video.muted !== preferredMuted
+      ) {
+        restorePreferredState(video);
+      }
       updateUI();
-    });
+    };
     const restoreAfterMediaChange = () => {
       setTimeout(() => {
         if (video !== getVideo()) return;
@@ -1221,6 +1379,8 @@
         updateUI();
       }, 0);
     };
+    videoBinding = { video, onVolumeChange, restoreAfterMediaChange };
+    video.addEventListener('volumechange', onVolumeChange);
     video.addEventListener('loadedmetadata', restoreAfterMediaChange);
     video.addEventListener('playing', restoreAfterMediaChange);
     updateUI();
@@ -1241,14 +1401,17 @@
 
   // Плеер меняет размер при разворачивании, режиме театра, ресайзе окна;
   // рамка вокруг ползунка — ещё и при наведении и перестройках интерфейса
-  const resizeObserver =
+  const playerResizeObserver =
     typeof ResizeObserver === 'function' ? new ResizeObserver(scheduleLayout) : null;
+  const uiResizeObserver =
+    typeof ResizeObserver === 'function' ? new ResizeObserver(scheduleLayout) : null;
+  const observedChain = new Set();
 
   function observePlayer() {
     const player = getPlayer();
-    if (!resizeObserver || !player || player === observedPlayer) return;
-    if (observedPlayer) resizeObserver.unobserve(observedPlayer);
-    resizeObserver.observe(player);
+    if (!playerResizeObserver || !player || player === observedPlayer) return;
+    if (observedPlayer) playerResizeObserver.unobserve(observedPlayer);
+    playerResizeObserver.observe(player);
     observedPlayer = player;
   }
 
@@ -1256,11 +1419,22 @@
   // любая обёртка) изменит размер, длина пересчитается сразу, а не по
   // секундному таймеру
   function observeChain() {
-    if (!resizeObserver || !ui) return;
+    if (!uiResizeObserver || !ui) return;
+    for (const el of observedChain) uiResizeObserver.unobserve(el);
+    observedChain.clear();
     const player = getPlayer();
     for (let el = ui.box.parentElement; el && el !== player; el = el.parentElement) {
-      resizeObserver.observe(el); // повторный observe того же узла — no-op
+      uiResizeObserver.observe(el);
+      observedChain.add(el);
     }
+  }
+
+  function stopObservingUI() {
+    if (playerResizeObserver) playerResizeObserver.disconnect();
+    if (uiResizeObserver) uiResizeObserver.disconnect();
+    observedPlayer = null;
+    observedPill = null;
+    observedChain.clear();
   }
 
   // Куда встраивать блок. На обычной странице — в строку управления
@@ -1535,6 +1709,7 @@
 
   // Полный демонтаж: штатная громкость возвращается на место
   function teardownUI() {
+    stopObservingUI();
     restoreNativeVolume();
     for (const el of document.querySelectorAll('.ytev-active')) {
       el.classList.remove('ytev-active');
@@ -1545,7 +1720,6 @@
     for (const box of document.querySelectorAll('.ytev-box')) box.remove();
     for (const host of document.querySelectorAll('.ytev-overlay')) host.remove();
     ui = null;
-    boundVideo = null;
   }
 
   function ensureUI() {
@@ -1557,6 +1731,7 @@
     // работать — её применяет перехватчик громкости
     if (SETTINGS.useNativeSlider) {
       if (ui) teardownUI();
+      bindVideo();
       return;
     }
     const mount = findMount();
@@ -1623,6 +1798,7 @@
     slider.max = '100';
     slider.step = '0.1';
     slider.className = 'ytev-slider';
+    slider.setAttribute('aria-label', 'Громкость');
 
     const label = document.createElement('span');
     label.className = 'ytev-label';
@@ -1720,15 +1896,25 @@
   }
 
   // YouTube — SPA: плеер может появляться/пересоздаваться при навигации.
-  // Заодно раз в секунду переспрашиваем настройки у bridge — доставка
-  // становится самовосстанавливающейся, даже если разовое сообщение
-  // потерялось (bridge отвечает текущим содержимым chrome.storage)
+  // Настройки повторно запрашиваем только до первого ответа bridge:
+  // дальнейшие изменения приходят через chrome.storage.onChanged.
   setInterval(() => {
+    bindVideo();
     ensureUI();
-    window.postMessage({ type: 'YTEV_GET_SETTINGS' }, '*');
+    if (!settingsReceived) {
+      window.postMessage(
+        { type: 'YTEV_GET_SETTINGS', channel: CHANNEL_ID },
+        PAGE_ORIGIN
+      );
+    }
   }, 1000);
-  document.addEventListener('yt-navigate-finish', () => setTimeout(ensureUI, 0));
-  document.addEventListener('DOMContentLoaded', ensureUI);
+  const refreshAfterNavigation = () =>
+    setTimeout(() => {
+      bindVideo();
+      ensureUI();
+    }, 0);
+  document.addEventListener('yt-navigate-finish', refreshAfterNavigation);
+  document.addEventListener('DOMContentLoaded', refreshAfterNavigation);
   document.addEventListener('fullscreenchange', () => setTimeout(layout, 0));
   window.addEventListener('resize', layout);
 })();
