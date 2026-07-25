@@ -182,20 +182,27 @@
     return el.clientWidth - num(s.paddingLeft) - num(s.paddingRight);
   };
 
-  // Свободное место под ползунок: из внутренней ширины строки управления
-  // вычитаем правые кнопки, соседей слева и собственную подпись — всё
-  // вместе с отступами.
-  function freeSpace(row, controls) {
+  // Свободное место под ползунок: идём от нашего блока вверх до строки
+  // управления (через любое число обёрток — в новом интерфейсе YouTube
+  // кнопки вложены в «пилюли») и на каждом уровне вычитаем соседей вместе
+  // с отступами, а у промежуточных обёрток — их собственные поля и рамки.
+  function freeSpace(row) {
     let free = innerWidth(row);
     if (free <= 0) return 0; // панель скрыта — измерить нечего
 
-    for (const child of row.children) {
-      if (child !== controls) free -= outerWidth(child); // правые кнопки и т.п.
-    }
-    const cs = getComputedStyle(controls);
-    free -= num(cs.paddingLeft) + num(cs.paddingRight);
-    for (const child of controls.children) {
-      if (child !== ui.box) free -= outerWidth(child);
+    for (let node = ui.box; node && node !== row; node = node.parentElement) {
+      const parent = node.parentElement;
+      if (!parent) return 0; // блок оторван от DOM
+      for (const sib of parent.children) {
+        if (sib !== node) free -= outerWidth(sib);
+      }
+      if (parent !== row) {
+        const s = getComputedStyle(parent);
+        free -=
+          num(s.paddingLeft) + num(s.paddingRight) +
+          num(s.marginLeft) + num(s.marginRight) +
+          num(s.borderLeftWidth) + num(s.borderRightWidth);
+      }
     }
     // собственные отступы блока и место под подпись с процентами
     free -= outerWidth(ui.box) - ui.slider.getBoundingClientRect().width;
@@ -208,9 +215,14 @@
   function layout() {
     if (!ui) return;
     const player = getPlayer();
-    const controls = ui.box.parentElement;
-    const row = controls && controls.parentElement; // .ytp-chrome-controls
-    if (!player || !row) return;
+    if (!player) return;
+    // строка управления — ближайший предок, в котором есть и правые кнопки
+    const rightControls = player.querySelector('.ytp-right-controls');
+    let row = ui.box.parentElement;
+    while (row && row !== player && !(rightControls && row.contains(rightControls))) {
+      row = row.parentElement;
+    }
+    if (!row) return;
 
     // меряем в видимом состоянии и без штатного ползунка, иначе решение
     // зависело бы от предыдущего и режим отката «залипал» бы
@@ -225,13 +237,16 @@
     // один и тот же независимо от предыдущего состояния.
     ui.slider.style.width = MIN_SLIDER + 'px';
 
-    let free = freeSpace(row, controls);
+    let free = freeSpace(row);
     if (free < MIN_SLIDER) {
       ui.label.style.display = 'none';
-      free = freeSpace(row, controls);
+      free = freeSpace(row);
     }
 
-    const desired = player.clientWidth * (SETTINGS.sliderScale / 100);
+    // защита от нечисловой/отсутствующей настройки (например, осталась
+    // запись старого формата) — иначе ширина стала бы NaN и не применилась
+    const scale = num(SETTINGS.sliderScale) || 20;
+    const desired = player.clientWidth * (scale / 100);
     ui.slider.style.width =
       Math.round(Math.max(MIN_SLIDER, Math.min(desired, free))) + 'px';
 
@@ -287,10 +302,13 @@
 
     box.append(slider, label);
 
-    // ставим блок прямо в .ytp-left-controls (после кнопки звука), иначе
-    // он попадёт внутрь .ytp-volume-area и собьёт расчёт свободного места
-    let anchor = controls.querySelector('.ytp-volume-area, .ytp-mute-button');
-    while (anchor && anchor.parentElement !== controls) anchor = anchor.parentElement;
+    // встаём точно на место штатного ползунка — внутрь его контейнера.
+    // В новом интерфейсе YouTube кнопки слева обёрнуты в скруглённую
+    // «пилюлю»; если вставить блок снаружи, штатная рамка не охватит его
+    const anchor =
+      controls.querySelector('.ytp-volume-panel') ||
+      controls.querySelector('.ytp-volume-area') ||
+      controls.querySelector('.ytp-mute-button');
     if (anchor) anchor.after(box);
     else controls.appendChild(box);
 
