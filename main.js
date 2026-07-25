@@ -5,9 +5,10 @@
   'use strict';
 
   const SETTINGS = {
-    enabled: true,     // применять экспоненциальную кривую
-    gamma: 3,          // крутизна кривой: real = logical^gamma (1 = линейно)
-    sliderScale: 20,   // длина ползунка в % от ширины плеера
+    enabled: true,      // применять экспоненциальную кривую
+    gamma: 3,           // крутизна кривой: real = logical^gamma (1 = линейно)
+    sliderScale: 20,    // длина ползунка в % от ширины плеера
+    showPercent: true,  // подпись с процентами рядом с ползунком
   };
 
   /* ------------------------------------------------------------------ *
@@ -82,6 +83,15 @@
   style.textContent = `
     /* штатный ползунок скрыт, но возвращается, если для нашего нет места */
     #movie_player:not(.ytev-fallback) .ytp-volume-panel { display: none !important; }
+    /* при наведении YouTube резервирует ширину под выезжающий штатный
+       ползунок — он скрыт, поэтому рамка раздувалась бы впустую; пока
+       работает наш ползунок, запрещаем области громкости менять ширину */
+    #movie_player:not(.ytev-fallback) .ytp-volume-area {
+      width: auto !important;
+      min-width: 0 !important;
+      max-width: none !important;
+      transition: none !important;
+    }
     .ytev-box {
       --ytev-track: 4px;
       --ytev-thumb: 13px;
@@ -228,7 +238,7 @@
     // зависело бы от предыдущего и режим отката «залипал» бы
     player.classList.remove('ytev-fallback');
     ui.box.style.display = '';
-    ui.label.style.display = '';
+    ui.label.style.display = SETTINGS.showPercent ? '' : 'none';
     if (innerWidth(row) <= 0) return;
 
     // Меряем, сжав ползунок до минимума: соседи (название главы) тоже
@@ -238,7 +248,7 @@
     ui.slider.style.width = MIN_SLIDER + 'px';
 
     let free = freeSpace(row);
-    if (free < MIN_SLIDER) {
+    if (free < MIN_SLIDER && SETTINGS.showPercent) {
       ui.label.style.display = 'none';
       free = freeSpace(row);
     }
@@ -265,9 +275,23 @@
     updateUI();
   }
 
-  // Плеер меняет размер при разворачивании, режиме театра, ресайзе окна
+  // Пересчёт по любому изменению размеров откладываем до следующего
+  // кадра: layout() сам меняет ширину ползунка, и синхронный вызов из
+  // ResizeObserver зациклил бы наблюдатель. Повторные вызовы схлопываются.
+  let layoutQueued = false;
+  function scheduleLayout() {
+    if (layoutQueued) return;
+    layoutQueued = true;
+    requestAnimationFrame(() => {
+      layoutQueued = false;
+      layout();
+    });
+  }
+
+  // Плеер меняет размер при разворачивании, режиме театра, ресайзе окна;
+  // рамка вокруг ползунка — ещё и при наведении и перестройках интерфейса
   const resizeObserver =
-    typeof ResizeObserver === 'function' ? new ResizeObserver(() => layout()) : null;
+    typeof ResizeObserver === 'function' ? new ResizeObserver(scheduleLayout) : null;
 
   function observePlayer() {
     const player = getPlayer();
@@ -275,6 +299,17 @@
     if (observedPlayer) resizeObserver.unobserve(observedPlayer);
     resizeObserver.observe(player);
     observedPlayer = player;
+  }
+
+  // Следим за всеми контейнерами от ползунка до плеера: если рамка (или
+  // любая обёртка) изменит размер, длина пересчитается сразу, а не по
+  // секундному таймеру
+  function observeChain() {
+    if (!resizeObserver || !ui) return;
+    const player = getPlayer();
+    for (let el = ui.box.parentElement; el && el !== player; el = el.parentElement) {
+      resizeObserver.observe(el); // повторный observe того же узла — no-op
+    }
   }
 
   function ensureUI() {
@@ -330,6 +365,7 @@
     );
 
     ui = { box, slider, label };
+    observeChain();
     bindVideo();
     updateUI();
     layout();
