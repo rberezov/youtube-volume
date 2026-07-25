@@ -4,7 +4,7 @@
 (() => {
   'use strict';
 
-  const DEFAULTS = { enabled: true, gamma: 3, sliderScale: 20, showPercent: true };
+  const DEFAULTS = { enabled: true, gamma: 3, showPercent: true, autoCollapse: false };
 
   function send(settings) {
     window.postMessage({ type: 'YTEV_SETTINGS', settings }, '*');

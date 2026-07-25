@@ -5,10 +5,10 @@
   'use strict';
 
   const SETTINGS = {
-    enabled: true,      // применять экспоненциальную кривую
-    gamma: 3,           // крутизна кривой: real = logical^gamma (1 = линейно)
-    sliderScale: 20,    // длина ползунка в % от ширины плеера
-    showPercent: true,  // подпись с процентами рядом с ползунком
+    enabled: true,       // применять экспоненциальную кривую
+    gamma: 3,            // крутизна кривой: real = logical^gamma (1 = линейно)
+    showPercent: true,   // подпись с процентами рядом с ползунком
+    autoCollapse: false, // сворачивать шкалу, когда курсор не на ней
   };
 
   /* ------------------------------------------------------------------ *
@@ -67,6 +67,7 @@
     reapplyCurve();
     layout();
     updateUI();
+    updateCollapsed();
   });
   window.postMessage({ type: 'YTEV_GET_SETTINGS' }, '*');
 
@@ -138,13 +139,50 @@
     }
     .ytev-box:not(.ytev-framed) .ytev-mute { height: 24px; }
     .ytev-mute svg { width: 100%; height: 100%; display: block; }
-    /* состояния значка: тихо — без волн, до 50% — одна волна, громче —
-       две, выключен — перечёркнут */
-    .ytev-i-w1, .ytev-i-w2, .ytev-i-off { display: none; }
-    .ytev-box[data-vol="low"] .ytev-i-w1 { display: inline; }
+    .ytev-mute { transition: transform .1s; }
+    .ytev-mute:hover { transform: scale(1.08); }
+    /* состояния значка как у YouTube: тихо — без волн, до 50% — одна
+       волна, громче — две, выключен — перечёркнут; волны плавно
+       появляются/уходят от «рупора» */
+    .ytev-i-w1, .ytev-i-w2 {
+      opacity: 0;
+      transform: scale(.4);
+      transform-box: fill-box;
+      transform-origin: left center;
+      transition: opacity .18s ease, transform .18s ease;
+    }
+    .ytev-i-off {
+      opacity: 0;
+      transition: opacity .15s ease;
+    }
+    .ytev-box[data-vol="low"] .ytev-i-w1 { opacity: 1; transform: none; }
     .ytev-box[data-vol="high"] .ytev-i-w1,
-    .ytev-box[data-vol="high"] .ytev-i-w2 { display: inline; }
-    .ytev-box[data-vol="muted"] .ytev-i-off { display: inline; }
+    .ytev-box[data-vol="high"] .ytev-i-w2 { opacity: 1; transform: none; }
+    .ytev-box[data-vol="muted"] .ytev-i-off { opacity: 1; }
+    /* пульс значка при каждом изменении громкости */
+    @keyframes ytev-vol-pulse {
+      0% { transform: scale(1); }
+      40% { transform: scale(1.14); }
+      100% { transform: scale(1); }
+    }
+    .ytev-mute.ytev-anim svg { animation: ytev-vol-pulse .25s ease; }
+    /* автосворачивание: без курсора остаётся только кнопка; переходы
+       включаются лишь на время переключения (.ytev-animating), чтобы
+       не мешать замерам layout() */
+    .ytev-box.ytev-animating { transition: gap .25s ease; }
+    .ytev-box.ytev-animating .ytev-slider { transition: width .25s ease, opacity .2s ease; }
+    .ytev-box.ytev-animating .ytev-label { transition: max-width .25s ease, opacity .2s ease; }
+    .ytev-box.ytev-collapsed { gap: 0; }
+    .ytev-box.ytev-collapsed .ytev-slider {
+      width: 0 !important;
+      min-width: 0 !important;
+      opacity: 0;
+    }
+    .ytev-box.ytev-collapsed .ytev-label {
+      max-width: 0;
+      min-width: 0;
+      opacity: 0;
+    }
     /* подсветка при наведении — скруглённый слой с отступом только по
        бокам, как у штатных элементов YouTube; на раскладку не влияет */
     .ytev-box.ytev-framed::after {
@@ -191,6 +229,8 @@
       font-size: var(--ytev-font);
       line-height: 1;
       min-width: 2.5em; /* ровно под «100%», чтобы рамка не гуляла по ширине */
+      max-width: 5em;
+      overflow: hidden;
       text-align: center; /* запас ширины делится поровну на обе стороны */
       white-space: nowrap;
       user-select: none;
@@ -201,7 +241,11 @@
   document.documentElement.appendChild(style);
 
   const MIN_SLIDER = 48; // короче — бесполезно, лучше спрятать
-  const SAFETY_GAP = 16; // запас, чтобы панель не «поехала»
+  const SAFETY_GAP = 4;  // запас на округления, чтобы панель не «поехала»
+
+  // фиксированный отступ по краям рамки: вычисляется ОДИН раз из размеров
+  // плашки при первом измерении и дальше не меняется
+  let edgeGap = 0;
 
   // { box, slider, label, muteBtn, hiddenPill }
   let ui = null;
@@ -235,7 +279,14 @@
     ui.box.dataset.vol = muted ? 'muted' : pct < 50 ? 'low' : 'high';
     if (ui.muteBtn) {
       ui.muteBtn.title = muted ? 'Включить звук (m)' : 'Отключить звук (m)';
+      // пульс значка при изменении громкости, как у YouTube
+      if (ui.prevPct !== undefined && Math.abs(pct - ui.prevPct) > 0.05) {
+        ui.muteBtn.classList.remove('ytev-anim');
+        void ui.muteBtn.offsetWidth; // перезапуск анимации
+        ui.muteBtn.classList.add('ytev-anim');
+      }
     }
+    ui.prevPct = pct;
     const real = toReal(pct / 100) * 100;
     ui.slider.title = SETTINGS.enabled
       ? `Громкость: ${fmt(pct)} (на выходе ≈ ${fmt(real)})`
@@ -367,6 +418,8 @@
     }
     const s = surface.style;
     const h = Math.round(surface.h);
+    if (!edgeGap) edgeGap = Math.max(6, Math.round(h * 0.2));
+    st.margin = '0 ' + edgeGap + 'px';
     st.background = s.backgroundColor;
     st.borderRadius = s.borderRadius;
     st.height = h + 'px';
@@ -406,11 +459,14 @@
     return free - SAFETY_GAP;
   }
 
-  // Длина ползунка = доля ширины плеера, ограниченная свободным местом.
-  // Если места мало, сначала убираем подпись с процентами, а если и это не
-  // помогло — прячем ползунок и возвращаем штатный (мини-плеер, узкое окно).
+  // Ползунок занимает всю свободную ширину строки; по краям — постоянный
+  // зазор edgeGap. Если места мало, сначала убираем подпись с процентами,
+  // а если и это не помогло — прячем ползунок и возвращаем штатный
+  // (мини-плеер, узкое окно).
   function layout() {
     if (!ui) return;
+    // идёт анимация сворачивания — замеры бессмысленны, вернёмся тиком позже
+    if (ui.box.classList.contains('ytev-animating')) return;
     const player = getPlayer();
     if (!player) return;
     // строка управления — ближайший предок, в котором есть и правые кнопки
@@ -421,12 +477,17 @@
     }
     if (!row) return;
 
-    // меряем в видимом состоянии и без штатного ползунка, иначе решение
-    // зависело бы от предыдущего и режим отката «залипал» бы
+    // меряем в развёрнутом видимом состоянии и без штатного ползунка,
+    // иначе решение зависело бы от предыдущего и режим отката «залипал» бы
+    const wasCollapsed = ui.box.classList.contains('ytev-collapsed');
+    ui.box.classList.remove('ytev-collapsed');
     enterNormal(player);
     ui.label.style.display = SETTINGS.showPercent ? '' : 'none';
     syncFrameStyle(); // поля рамки влияют на замер — обновляем до него
-    if (innerWidth(row) <= 0) return;
+    if (innerWidth(row) <= 0) {
+      if (wasCollapsed) updateCollapsed(false);
+      return;
+    }
 
     // Меряем, сжав ползунок до минимума: соседи (название главы) тоже
     // умеют сжиматься, и замер при текущей длине зависел бы от неё самой —
@@ -440,18 +501,44 @@
       free = freeSpace(row);
     }
 
-    // защита от нечисловой/отсутствующей настройки (например, осталась
-    // запись старого формата) — иначе ширина стала бы NaN и не применилась
-    const scale = num(SETTINGS.sliderScale) || 20;
-    const desired = player.clientWidth * (scale / 100);
-    ui.slider.style.width =
-      Math.round(Math.max(MIN_SLIDER, Math.min(desired, free))) + 'px';
+    ui.slider.style.width = Math.round(Math.max(MIN_SLIDER, free)) + 'px';
 
     // подстраховка на случай неточного замера: если flex всё-таки сжал
     // ползунок до бесполезной длины — отдаём место штатному
     if (ui.slider.getBoundingClientRect().width < MIN_SLIDER - 1) {
       enterFallback(player);
+    } else if (wasCollapsed) {
+      updateCollapsed(false); // вернуть свёрнутое состояние без анимации
     }
+  }
+
+  // Автосворачивание: класс ytev-collapsed ставится, когда включена
+  // настройка и на блоке нет ни курсора, ни фокуса. Переходы включаются
+  // только на время переключения, чтобы не мешать замерам layout().
+  let collapseTimer = 0;
+  let animTimer = 0;
+  function updateCollapsed(animate = true) {
+    if (!ui) return;
+    // разворот держит только клавиатурный фокус (:focus-visible) — обычный
+    // клик по кнопке оставляет фокус внутри блока и не должен мешать
+    // сворачиванию
+    let keyboardFocus = false;
+    try {
+      keyboardFocus = !!ui.box.querySelector(':focus-visible');
+    } catch {}
+    const want = !!SETTINGS.autoCollapse && !ui.hover && !keyboardFocus;
+    if (want === ui.box.classList.contains('ytev-collapsed')) return;
+    if (!animate) {
+      ui.box.classList.toggle('ytev-collapsed', want);
+      return;
+    }
+    ui.box.classList.add('ytev-animating');
+    ui.box.classList.toggle('ytev-collapsed', want);
+    clearTimeout(animTimer);
+    animTimer = setTimeout(() => {
+      if (ui) ui.box.classList.remove('ytev-animating');
+      scheduleLayout();
+    }, 350);
   }
 
   function bindVideo() {
@@ -585,6 +672,21 @@
     slider.addEventListener('input', applySliderValue);
     // стрелки должны двигать ползунок (шаг 0.1%), а не перематывать видео
     slider.addEventListener('keydown', (e) => e.stopPropagation());
+    // автосворачивание: следим за курсором и фокусом на блоке
+    box.addEventListener('mouseenter', () => {
+      if (!ui) return;
+      ui.hover = true;
+      clearTimeout(collapseTimer);
+      updateCollapsed();
+    });
+    box.addEventListener('mouseleave', () => {
+      if (!ui) return;
+      ui.hover = false;
+      clearTimeout(collapseTimer);
+      collapseTimer = setTimeout(updateCollapsed, 500);
+    });
+    box.addEventListener('focusin', () => updateCollapsed());
+    box.addEventListener('focusout', () => setTimeout(updateCollapsed, 0));
     // колесо мыши над ползунком: ±1%, с Shift ±0.1%
     box.addEventListener(
       'wheel',
@@ -599,12 +701,13 @@
       { passive: false }
     );
 
-    ui = { box, slider, label, muteBtn };
+    ui = { box, slider, label, muteBtn, hover: false };
     markDonorPill(controls);
     observeChain();
     bindVideo();
     updateUI();
     layout();
+    updateCollapsed(false);
   }
 
   function applySliderValue() {
