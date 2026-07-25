@@ -1,43 +1,17 @@
-// Isolated world: мост между chrome.storage и main.js (MAIN world).
-// main.js не имеет доступа к chrome.*, поэтому настройки пересылаются
-// через window.postMessage.
+// Isolated world: запускает main.js через service worker и принимает только
+// запросы на сохранение, подтверждённые доверенным действием пользователя.
 (() => {
   'use strict';
 
   const PAGE_ORIGIN = location.origin;
-  const CHANNEL_PATTERN = /^[a-f0-9]{32}$/;
   const WRITE_INTERVAL_MS = 250;
   const INTENT_WINDOW_MS = 2000;
-  const DEFAULTS = {
-    enabled: true,
-    gamma: 3,
-    sliderScale: 20,
-    shortsScale: 50,
-    showPercent: true,
-    autoCollapse: false,
-    useNativeSlider: false,
-  };
-
-  function normalizeSettings(value) {
-    const result = { ...DEFAULTS };
-    if (!value || typeof value !== 'object') return result;
-    for (const key of ['enabled', 'showPercent', 'autoCollapse', 'useNativeSlider']) {
-      if (typeof value[key] === 'boolean') result[key] = value[key];
-    }
-    const gamma = Number(value.gamma);
-    const sliderScale = Number(value.sliderScale);
-    const shortsScale = Number(value.shortsScale);
-    if (Number.isFinite(gamma)) result.gamma = Math.min(6, Math.max(1, gamma));
-    if (Number.isFinite(sliderScale)) {
-      result.sliderScale = Math.min(70, Math.max(2, sliderScale));
-    }
-    if (Number.isFinite(shortsScale)) {
-      result.shortsScale = Math.min(70, Math.max(2, shortsScale));
-    }
-    return result;
-  }
-
-  let activeChannel = null;
+  const randomHex = (byteLength) =>
+    Array.from(crypto.getRandomValues(new Uint8Array(byteLength)), (value) =>
+      value.toString(16).padStart(2, '0')
+    ).join('');
+  const activeChannel = randomHex(16);
+  const updateSecret = randomHex(32);
   let volumeIntentUntil = 0;
   let mutedIntentUntil = 0;
   let volumeIntentBudget = 0;
@@ -47,23 +21,6 @@
   let pendingWrite = {};
   let writeTimer = 0;
   let lastWriteAt = 0;
-
-  function validChannel(value) {
-    return typeof value === 'string' && CHANNEL_PATTERN.test(value);
-  }
-
-  function send(settings, state) {
-    if (!activeChannel) return;
-    window.postMessage(
-      {
-        type: 'YTEV_SETTINGS',
-        channel: activeChannel,
-        settings: normalizeSettings(settings),
-        state,
-      },
-      PAGE_ORIGIN
-    );
-  }
 
   function grantVolumeIntent(duration = INTENT_WINDOW_MS, expected) {
     volumeIntentUntil = Date.now() + duration;
@@ -291,16 +248,13 @@
     }
   };
 
-  function load() {
-    if (!activeChannel || !alive()) return;
+  function sendRuntime(type) {
+    if (!alive()) return;
     try {
-      chrome.storage.sync.get(DEFAULTS, (settings) => {
-        if (chrome.runtime.lastError) return;
-        chrome.storage.local.get({ savedVolume: null, savedMuted: null }, (state) => {
-          if (chrome.runtime.lastError) return;
-          send(settings, state);
-        });
-      });
+      chrome.runtime.sendMessage(
+        { type, channel: activeChannel, secret: updateSecret },
+        () => void chrome.runtime.lastError
+      );
     } catch {}
   }
 
@@ -322,21 +276,9 @@
     writeTimer = setTimeout(flushWrite, delay);
   }
 
-  // main.js запрашивает настройки при старте (порядок загрузки не гарантирован)
-  let lastRequestLoad = 0;
   window.addEventListener('message', (e) => {
     if (e.source !== window || e.origin !== PAGE_ORIGIN || !e.data) return;
-    if (e.data.type === 'YTEV_GET_SETTINGS') {
-      if (!validChannel(e.data.channel)) return;
-      if (activeChannel && e.data.channel !== activeChannel) return;
-      activeChannel = e.data.channel;
-      const now = Date.now();
-      if (now - lastRequestLoad < 500) return;
-      lastRequestLoad = now;
-      load();
-      return;
-    }
-    if (!activeChannel || e.data.channel !== activeChannel) return;
+    if (e.data.channel !== activeChannel) return;
     if (e.data.type === 'YTEV_SAVE_VOLUME') {
       const volume = Number(e.data.volume);
       if (
@@ -363,7 +305,9 @@
 
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === 'sync') load();
+      if (area === 'sync') sendRuntime('YTEV_UPDATE_SETTINGS');
     });
   } catch {}
+
+  sendRuntime('YTEV_INIT');
 })();

@@ -1,20 +1,21 @@
-// Работает в MAIN-мире страницы: перехватывает установку громкости у
-// HTMLMediaElement и применяет экспоненциальную кривую, а также добавляет
-// в панель плеера длинный точный ползунок вместо стандартного.
-(() => {
+// Запускается service worker через chrome.scripting.executeScript в MAIN-мире:
+// перехватывает установку громкости у HTMLMediaElement, применяет
+// экспоненциальную кривую и добавляет точный ползунок.
+function youtubeVolumeMain(initialPayload, updateSecret) {
   'use strict';
 
   const PAGE_ORIGIN = location.origin;
-  const CHANNEL_ID = Array.from(window.crypto.getRandomValues(new Uint8Array(16)), (v) =>
-    v.toString(16).padStart(2, '0')
-  ).join('');
-  const INSTANCE_KEY = Symbol.for('ytev.main.instance.v1');
-  if (window[INSTANCE_KEY]) return;
-  Object.defineProperty(window, INSTANCE_KEY, {
-    configurable: false,
-    enumerable: false,
-    value: true,
-  });
+  const CHANNEL_PATTERN = /^[a-f0-9]{32}$/;
+  const SECRET_PATTERN = /^[a-f0-9]{64}$/;
+  const CHANNEL_ID =
+    initialPayload && typeof initialPayload.channel === 'string'
+      ? initialPayload.channel
+      : '';
+  if (!CHANNEL_PATTERN.test(CHANNEL_ID) || !SECRET_PATTERN.test(updateSecret)) {
+    return false;
+  }
+  const INSTANCE_KEY = Symbol.for('ytev.main.instance.v2');
+  if (window[INSTANCE_KEY]) return false;
 
   const SETTINGS = {
     enabled: true,          // применять экспоненциальную кривую
@@ -550,25 +551,17 @@
   }
 
   /* ------------------------------------------------------------------ *
-   * 2. Настройки из popup (приходят через bridge.js, isolated world)
+   * 2. Настройки из popup (доверенная инъекция через service worker)
    * ------------------------------------------------------------------ */
 
-  let settingsReceived = false;
-  window.addEventListener('message', (e) => {
-    if (
-      e.source !== window ||
-      e.origin !== PAGE_ORIGIN ||
-      !e.data ||
-      e.data.type !== 'YTEV_SETTINGS' ||
-      e.data.channel !== CHANNEL_ID
-    ) {
-      return;
-    }
-    applySettings(e.data.settings);
-    settingsReceived = true;
+  function applyTrustedPayload(payload, includeState = false) {
+    if (!payload || typeof payload !== 'object') return false;
+    applySettings(payload.settings);
     if (!volumeStateLoaded) {
       const state =
-        e.data.state && typeof e.data.state === 'object' ? e.data.state : {};
+        includeState && payload.state && typeof payload.state === 'object'
+          ? payload.state
+          : {};
       const savedValue = state.savedVolume;
       const savedVolume = Number(savedValue);
       if (!preferredVolumeDirty && savedValue != null && validVolume(savedVolume)) {
@@ -592,11 +585,16 @@
     layout();
     updateUI();
     updateCollapsed();
+    return true;
+  }
+
+  const instanceApi = Object.freeze({
+    version: 2,
+    update(candidateSecret, payload) {
+      if (candidateSecret !== updateSecret) return false;
+      return applyTrustedPayload(payload, false);
+    },
   });
-  window.postMessage(
-    { type: 'YTEV_GET_SETTINGS', channel: CHANNEL_ID },
-    PAGE_ORIGIN
-  );
 
   /* ------------------------------------------------------------------ *
    * 3. Длинный точный ползунок в панели плеера
@@ -1895,18 +1893,18 @@
     }, 250);
   }
 
+  applyTrustedPayload(initialPayload, true);
+  Object.defineProperty(window, INSTANCE_KEY, {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: instanceApi,
+  });
+
   // YouTube — SPA: плеер может появляться/пересоздаваться при навигации.
-  // Настройки повторно запрашиваем только до первого ответа bridge:
-  // дальнейшие изменения приходят через chrome.storage.onChanged.
   setInterval(() => {
     bindVideo();
     ensureUI();
-    if (!settingsReceived) {
-      window.postMessage(
-        { type: 'YTEV_GET_SETTINGS', channel: CHANNEL_ID },
-        PAGE_ORIGIN
-      );
-    }
   }, 1000);
   const refreshAfterNavigation = () =>
     setTimeout(() => {
@@ -1917,4 +1915,5 @@
   document.addEventListener('DOMContentLoaded', refreshAfterNavigation);
   document.addEventListener('fullscreenchange', () => setTimeout(layout, 0));
   window.addEventListener('resize', layout);
-})();
+  return true;
+}
