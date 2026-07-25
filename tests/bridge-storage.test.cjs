@@ -24,7 +24,12 @@ const chromeMock = {
   storage: {
     sync: {
       get(defaults, callback) {
-        callback({ ...defaults, gamma: 2.5 });
+        callback({
+          ...defaults,
+          enabled: 'invalid',
+          gamma: 2.5,
+          shortsScale: 999,
+        });
       },
     },
     local: {
@@ -59,6 +64,8 @@ vm.runInContext(source, context, { filename: 'bridge.js' });
 assert.equal(posted.length, 1);
 assert.equal(posted[0].type, 'YTEV_SETTINGS');
 assert.equal(posted[0].settings.gamma, 2.5);
+assert.equal(posted[0].settings.enabled, true);
+assert.equal(posted[0].settings.shortsScale, 70);
 assert.equal(posted[0].state.savedVolume, 0.37);
 assert.equal(posted[0].state.savedMuted, false);
 

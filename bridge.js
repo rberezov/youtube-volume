@@ -14,8 +14,30 @@
     useNativeSlider: false,
   };
 
+  function normalizeSettings(value) {
+    const result = { ...DEFAULTS };
+    if (!value || typeof value !== 'object') return result;
+    for (const key of ['enabled', 'showPercent', 'autoCollapse', 'useNativeSlider']) {
+      if (typeof value[key] === 'boolean') result[key] = value[key];
+    }
+    const gamma = Number(value.gamma);
+    const sliderScale = Number(value.sliderScale);
+    const shortsScale = Number(value.shortsScale);
+    if (Number.isFinite(gamma)) result.gamma = Math.min(6, Math.max(1, gamma));
+    if (Number.isFinite(sliderScale)) {
+      result.sliderScale = Math.min(70, Math.max(2, sliderScale));
+    }
+    if (Number.isFinite(shortsScale)) {
+      result.shortsScale = Math.min(70, Math.max(2, shortsScale));
+    }
+    return result;
+  }
+
   function send(settings, state) {
-    window.postMessage({ type: 'YTEV_SETTINGS', settings, state }, '*');
+    window.postMessage(
+      { type: 'YTEV_SETTINGS', settings: normalizeSettings(settings), state },
+      '*'
+    );
   }
 
   // После обновления/перезагрузки расширения старый мост на уже открытой
@@ -44,9 +66,13 @@
   }
 
   // main.js запрашивает настройки при старте (порядок загрузки не гарантирован)
+  let lastRequestLoad = 0;
   window.addEventListener('message', (e) => {
     if (e.source !== window || !e.data) return;
     if (e.data.type === 'YTEV_GET_SETTINGS') {
+      const now = Date.now();
+      if (now - lastRequestLoad < 500) return;
+      lastRequestLoad = now;
       load();
       return;
     }

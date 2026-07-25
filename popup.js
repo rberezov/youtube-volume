@@ -37,22 +37,27 @@ function render() {
 // записи молча отбрасывались квотой, включая финальное значение, и
 // настройка «не менялась»
 let saveTimer = 0;
-function save() {
+function values() {
+  return {
+    enabled: $enabled.checked,
+    gamma: Number($gamma.value),
+    sliderScale: Number($scale.value),
+    shortsScale: Number($shorts.value),
+    useNativeSlider: $useNative.checked,
+    showPercent: $showPercent.checked,
+    autoCollapse: $autoCollapse.checked,
+  };
+}
+
+function saveNow() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    chrome.storage.sync.set(
-      {
-        enabled: $enabled.checked,
-        gamma: Number($gamma.value),
-        sliderScale: Number($scale.value),
-        shortsScale: Number($shorts.value),
-        useNativeSlider: $useNative.checked,
-        showPercent: $showPercent.checked,
-        autoCollapse: $autoCollapse.checked,
-      },
-      () => void chrome.runtime.lastError
-    );
-  }, 250);
+  saveTimer = 0;
+  chrome.storage.sync.set(values(), () => void chrome.runtime.lastError);
+}
+
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveNow, 250);
 }
 
 chrome.storage.sync.get(DEFAULTS, (s) => {
@@ -69,6 +74,13 @@ chrome.storage.sync.get(DEFAULTS, (s) => {
 for (const el of [$enabled, $gamma, $scale, $shorts, $useNative, $showPercent, $autoCollapse]) {
   el.addEventListener('input', () => {
     render();
-    save();
+    scheduleSave();
   });
+  // Для range это срабатывает при отпускании бегунка, для checkbox —
+  // сразу после клика. Запись запускается до возможного закрытия popup.
+  el.addEventListener('change', saveNow);
 }
+
+window.addEventListener('pagehide', () => {
+  if (saveTimer) saveNow();
+});
