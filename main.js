@@ -7,7 +7,7 @@
   const SETTINGS = {
     enabled: true,     // применять экспоненциальную кривую
     gamma: 3,          // крутизна кривой: real = logical^gamma (1 = линейно)
-    sliderWidth: 220,  // длина ползунка в px
+    sliderScale: 20,   // длина ползунка в % от ширины плеера
   };
 
   /* ------------------------------------------------------------------ *
@@ -64,29 +64,46 @@
     if (e.source !== window || !e.data || e.data.type !== 'YTEV_SETTINGS') return;
     Object.assign(SETTINGS, e.data.settings);
     reapplyCurve();
-    applySliderSettings();
+    layout();
     updateUI();
   });
   window.postMessage({ type: 'YTEV_GET_SETTINGS' }, '*');
 
   /* ------------------------------------------------------------------ *
    * 3. Длинный точный ползунок в панели плеера
+   *
+   * Размеры задаются относительно плеера: толщина ползунка, бегунок и
+   * подпись масштабируются через CSS-переменные (в полноэкранном режиме
+   * YouTube ставит на плеер класс ytp-big-mode), а длина считается в JS —
+   * доля ширины плеера, ограниченная реально свободным местом в панели.
    * ------------------------------------------------------------------ */
 
   const style = document.createElement('style');
   style.textContent = `
-    #movie_player .ytp-volume-panel { display: none !important; }
+    /* штатный ползунок скрыт, но возвращается, если для нашего нет места */
+    #movie_player:not(.ytev-fallback) .ytp-volume-panel { display: none !important; }
     .ytev-box {
+      --ytev-track: 4px;
+      --ytev-thumb: 13px;
+      --ytev-font: 12px;
       display: flex;
       align-items: center;
+      align-self: center;
+      min-width: 0;
       margin-left: 6px;
-      max-width: 45%;
+    }
+    #movie_player.ytp-big-mode .ytev-box {
+      --ytev-track: 5px;
+      --ytev-thumb: 18px;
+      --ytev-font: 15px;
+      margin-left: 10px;
     }
     .ytev-slider {
       -webkit-appearance: none;
       appearance: none;
-      height: 4px;
-      border-radius: 2px;
+      min-width: 0;
+      height: var(--ytev-track);
+      border-radius: calc(var(--ytev-track) / 2);
       background: rgba(255, 255, 255, .3);
       outline: none;
       cursor: pointer;
@@ -95,8 +112,8 @@
     .ytev-slider::-webkit-slider-thumb {
       -webkit-appearance: none;
       appearance: none;
-      width: 13px;
-      height: 13px;
+      width: var(--ytev-thumb);
+      height: var(--ytev-thumb);
       border-radius: 50%;
       background: #fff;
       border: none;
@@ -104,11 +121,12 @@
     .ytev-label {
       color: #eee;
       font-family: Roboto, Arial, sans-serif;
-      font-size: 12px;
+      font-size: var(--ytev-font);
       line-height: 1;
-      margin-left: 8px;
-      min-width: 42px;
+      margin-left: .7em;
+      min-width: 3.4em;
       text-align: left;
+      white-space: nowrap;
       user-select: none;
     }
     .ytev-muted .ytev-slider,
@@ -116,8 +134,12 @@
   `;
   document.documentElement.appendChild(style);
 
+  const MIN_SLIDER = 48; // короче — бесполезно, лучше спрятать
+  const SAFETY_GAP = 16; // запас, чтобы панель не «поехала»
+
   let ui = null; // { box, slider, label }
   let boundVideo = null;
+  let observedPlayer = null;
 
   const getPlayer = () => document.getElementById('movie_player');
   const getVideo = () => {
@@ -147,23 +169,77 @@
       : `Громкость: ${fmt(pct)}`;
   }
 
-  function applySliderValue() {
-    const video = getVideo();
-    const player = getPlayer();
-    if (!video || !ui) return;
-    const pct = Math.min(100, Math.max(0, Number(ui.slider.value)));
-    if (video.muted && pct > 0) {
-      if (player && typeof player.unMute === 'function') player.unMute();
-      video.muted = false;
+  const num = (v) => parseFloat(v) || 0;
+
+  const outerWidth = (el) => {
+    const s = getComputedStyle(el);
+    if (s.display === 'none') return 0;
+    return el.getBoundingClientRect().width + num(s.marginLeft) + num(s.marginRight);
+  };
+
+  const innerWidth = (el) => {
+    const s = getComputedStyle(el);
+    return el.clientWidth - num(s.paddingLeft) - num(s.paddingRight);
+  };
+
+  // Свободное место под ползунок: из внутренней ширины строки управления
+  // вычитаем правые кнопки, соседей слева и собственную подпись — всё
+  // вместе с отступами.
+  function freeSpace(row, controls) {
+    let free = innerWidth(row);
+    if (free <= 0) return 0; // панель скрыта — измерить нечего
+
+    for (const child of row.children) {
+      if (child !== controls) free -= outerWidth(child); // правые кнопки и т.п.
     }
-    // setVolume сохраняет громкость в настройках YouTube, но округляет до
-    // целых — поэтому после него выставляем точное значение напрямую.
-    if (player && typeof player.setVolume === 'function') player.setVolume(pct);
-    video.volume = pct / 100;
+    const cs = getComputedStyle(controls);
+    free -= num(cs.paddingLeft) + num(cs.paddingRight);
+    for (const child of controls.children) {
+      if (child !== ui.box) free -= outerWidth(child);
+    }
+    // собственные отступы блока и место под подпись с процентами
+    free -= outerWidth(ui.box) - ui.slider.getBoundingClientRect().width;
+    return free - SAFETY_GAP;
   }
 
-  function applySliderSettings() {
-    if (ui) ui.slider.style.width = SETTINGS.sliderWidth + 'px';
+  // Длина ползунка = доля ширины плеера, ограниченная свободным местом.
+  // Если места мало, сначала убираем подпись с процентами, а если и это не
+  // помогло — прячем ползунок и возвращаем штатный (мини-плеер, узкое окно).
+  function layout() {
+    if (!ui) return;
+    const player = getPlayer();
+    const controls = ui.box.parentElement;
+    const row = controls && controls.parentElement; // .ytp-chrome-controls
+    if (!player || !row) return;
+
+    // меряем в видимом состоянии и без штатного ползунка, иначе решение
+    // зависело бы от предыдущего и режим отката «залипал» бы
+    player.classList.remove('ytev-fallback');
+    ui.box.style.display = '';
+    ui.label.style.display = '';
+    if (innerWidth(row) <= 0) return;
+
+    // Меряем, сжав ползунок до минимума: соседи (название главы) тоже
+    // умеют сжиматься, и замер при текущей длине зависел бы от неё самой —
+    // размер бы «дрожал» между двумя значениями. От минимума результат
+    // один и тот же независимо от предыдущего состояния.
+    ui.slider.style.width = MIN_SLIDER + 'px';
+
+    let free = freeSpace(row, controls);
+    if (free < MIN_SLIDER) {
+      ui.label.style.display = 'none';
+      free = freeSpace(row, controls);
+    }
+
+    const desired = player.clientWidth * (SETTINGS.sliderScale / 100);
+    ui.slider.style.width =
+      Math.round(Math.max(MIN_SLIDER, Math.min(desired, free))) + 'px';
+
+    // подстраховка на случай неточного замера: если flex всё-таки сжал
+    // ползунок до бесполезной длины — отдаём место штатному
+    const tooSmall = ui.slider.getBoundingClientRect().width < MIN_SLIDER - 1;
+    ui.box.style.display = tooSmall ? 'none' : '';
+    player.classList.toggle('ytev-fallback', tooSmall);
   }
 
   function bindVideo() {
@@ -174,11 +250,25 @@
     updateUI();
   }
 
+  // Плеер меняет размер при разворачивании, режиме театра, ресайзе окна
+  const resizeObserver =
+    typeof ResizeObserver === 'function' ? new ResizeObserver(() => layout()) : null;
+
+  function observePlayer() {
+    const player = getPlayer();
+    if (!resizeObserver || !player || player === observedPlayer) return;
+    if (observedPlayer) resizeObserver.unobserve(observedPlayer);
+    resizeObserver.observe(player);
+    observedPlayer = player;
+  }
+
   function ensureUI() {
     const controls = document.querySelector('#movie_player .ytp-left-controls');
     if (!controls) return;
+    observePlayer();
     if (ui && controls.contains(ui.box)) {
       bindVideo();
+      layout();
       return;
     }
 
@@ -197,9 +287,10 @@
 
     box.append(slider, label);
 
-    const anchor =
-      controls.querySelector('.ytp-volume-panel') ||
-      controls.querySelector('.ytp-mute-button');
+    // ставим блок прямо в .ytp-left-controls (после кнопки звука), иначе
+    // он попадёт внутрь .ytp-volume-area и собьёт расчёт свободного места
+    let anchor = controls.querySelector('.ytp-volume-area, .ytp-mute-button');
+    while (anchor && anchor.parentElement !== controls) anchor = anchor.parentElement;
     if (anchor) anchor.after(box);
     else controls.appendChild(box);
 
@@ -221,13 +312,30 @@
     );
 
     ui = { box, slider, label };
-    applySliderSettings();
     bindVideo();
     updateUI();
+    layout();
+  }
+
+  function applySliderValue() {
+    const video = getVideo();
+    const player = getPlayer();
+    if (!video || !ui) return;
+    const pct = Math.min(100, Math.max(0, Number(ui.slider.value)));
+    if (video.muted && pct > 0) {
+      if (player && typeof player.unMute === 'function') player.unMute();
+      video.muted = false;
+    }
+    // setVolume сохраняет громкость в настройках YouTube, но округляет до
+    // целых — поэтому после него выставляем точное значение напрямую.
+    if (player && typeof player.setVolume === 'function') player.setVolume(pct);
+    video.volume = pct / 100;
   }
 
   // YouTube — SPA: плеер может появляться/пересоздаваться при навигации
   setInterval(ensureUI, 1000);
   document.addEventListener('yt-navigate-finish', () => setTimeout(ensureUI, 0));
   document.addEventListener('DOMContentLoaded', ensureUI);
+  document.addEventListener('fullscreenchange', () => setTimeout(layout, 0));
+  window.addEventListener('resize', layout);
 })();
