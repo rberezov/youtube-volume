@@ -81,18 +81,18 @@
 
   const style = document.createElement('style');
   style.textContent = `
-    /* штатные ползунок и кнопка звука скрыты (кнопку рисуем свою — у
-       родной значок позиционируется внутренней раскладкой YouTube и при
-       любом изменении размеров кнопки уезжает); в режиме отката всё
-       штатное возвращается */
-    #movie_player:not(.ytev-fallback) .ytp-volume-panel,
-    #movie_player:not(.ytev-fallback) .ytp-mute-button {
+    /* Штатные ползунок и кнопка звука скрываются ТОЛЬКО при классе
+       ytev-active — он ставится после успешного монтирования нашего
+       блока и снимается в режиме отката. Если код расширения упадёт,
+       класса не будет и штатная громкость останется на месте. */
+    #movie_player.ytev-active .ytp-volume-panel,
+    #movie_player.ytev-active .ytp-mute-button {
       display: none !important;
     }
     /* при наведении YouTube резервирует ширину под выезжающий штатный
        ползунок — он скрыт, поэтому рамка раздувалась бы впустую; пока
        работает наш ползунок, запрещаем области громкости менять ширину */
-    #movie_player:not(.ytev-fallback) .ytp-volume-area {
+    #movie_player.ytev-active .ytp-volume-area {
       width: auto !important;
       min-width: 0 !important;
       max-width: none !important;
@@ -286,23 +286,25 @@
     }
   }
 
-  // Нормальный режим: наш блок виден, опустевшая пилюля спрятана
+  // Нормальный режим: наш блок виден и «в ответе» за громкость
+  // (класс ytev-active включает CSS-скрытие штатных элементов),
+  // опустевшая пилюля спрятана
   function enterNormal(player) {
-    player.classList.remove('ytev-fallback');
+    player.classList.add('ytev-active');
     if (ui.hiddenPill && ui.hiddenPill.isConnected) {
       ui.hiddenPill.style.display = 'none';
     }
     ui.box.style.display = '';
   }
 
-  // Откат (узкий плеер): наш блок спрятан, штатные кнопка и ползунок
-  // возвращаются (класс ytev-fallback снимает CSS-скрытие)
+  // Откат (узкий плеер): наш блок спрятан, снятие класса возвращает
+  // штатные кнопку и ползунок
   function enterFallback(player) {
     ui.box.style.display = 'none';
     if (ui.hiddenPill && ui.hiddenPill.isConnected) {
       ui.hiddenPill.style.display = '';
     }
-    player.classList.add('ytev-fallback');
+    player.classList.remove('ytev-active');
   }
 
   const isTransparentBg = (bg) =>
@@ -520,16 +522,33 @@
     const box = document.createElement('div');
     box.className = 'ytev-box';
 
-    // своя кнопка звука: значок предсказуемо центрирован при любом размере
+    // Своя кнопка звука: значок предсказуемо центрирован при любом
+    // размере. SVG строится через DOM API — на youtube.com действует
+    // Trusted Types CSP, и присваивание строки в innerHTML бросает
+    // исключение.
     const muteBtn = document.createElement('button');
     muteBtn.className = 'ytev-mute';
-    muteBtn.innerHTML =
-      '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
-      '<path d="M3 9v6h4l5 5V4L7 9H3z"/>' +
-      '<path class="ytev-i-w1" d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>' +
-      '<path class="ytev-i-w2" d="M14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>' +
-      '<path class="ytev-i-off" d="M4.27 3 3 4.27l16.73 16.73L21 19.73z"/>' +
-      '</svg>';
+    muteBtn.type = 'button';
+    {
+      const NS = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('fill', 'currentColor');
+      svg.setAttribute('aria-hidden', 'true');
+      const paths = [
+        ['', 'M3 9v6h4l5 5V4L7 9H3z'],
+        ['ytev-i-w1', 'M16.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z'],
+        ['ytev-i-w2', 'M14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z'],
+        ['ytev-i-off', 'M4.27 3 3 4.27l16.73 16.73L21 19.73z'],
+      ];
+      for (const [cls, d] of paths) {
+        const path = document.createElementNS(NS, 'path');
+        if (cls) path.setAttribute('class', cls);
+        path.setAttribute('d', d);
+        svg.appendChild(path);
+      }
+      muteBtn.appendChild(svg);
+    }
     muteBtn.addEventListener('click', () => {
       const player = getPlayer();
       const video = getVideo();
