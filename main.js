@@ -14,6 +14,25 @@
     useNativeSlider: false, // не строить свою шкалу — оставить штатную
   };
 
+  // Строка управления Shorts перехватывает bubbling/capture-события своих
+  // дочерних контролов. Из-за этого нативный range визуально двигался, но
+  // его собственный input-обработчик мог вообще не вызываться. Ловим input
+  // раньше обвязки YouTube — на window в capture-фазе — и передаём именно
+  // тот ползунок, который породил событие.
+  window.addEventListener(
+    'input',
+    (e) => {
+      const slider = e.target;
+      if (
+        slider instanceof HTMLInputElement &&
+        slider.classList.contains('ytev-slider')
+      ) {
+        applySliderValue(slider);
+      }
+    },
+    true
+  );
+
   /* ------------------------------------------------------------------ *
    * 1. Экспоненциальная кривая громкости
    *
@@ -65,7 +84,46 @@
     logicalVolume.has(el) ? logicalVolume.get(el) : nativeDesc.get.call(el);
 
   /* ------------------------------------------------------------------ *
-   * 1a. Регулировка через Web Audio — главное средство против треска
+   * 1a. Единая громкость для всех плееров YouTube
+   *
+   * Shorts и обычная страница используют разные <video>, а внутри ленты
+   * YouTube может переиспользовать элемент с новым media source. WeakMap
+   * выше намеренно хранит значение отдельно для каждого элемента, поэтому
+   * без общего уровня новый плеер возвращался к громкости YouTube.
+   * ------------------------------------------------------------------ */
+
+  const VOLUME_EPSILON = 0.0005;
+  let preferredVolume = null;
+  let volumeStateLoaded = false;
+  let preferredVolumeDirty = false;
+  let saveVolumeTimer = 0;
+  const validVolume = (value) =>
+    Number.isFinite(value) && value >= 0 && value <= 1;
+
+  function rememberVolume(value, persist = false) {
+    const volume = Number(value);
+    if (!validVolume(volume)) return;
+    preferredVolume = volume;
+    if (!persist) return;
+    preferredVolumeDirty = true;
+    clearTimeout(saveVolumeTimer);
+    saveVolumeTimer = setTimeout(() => {
+      window.postMessage({ type: 'YTEV_SAVE_VOLUME', volume }, '*');
+    }, 250);
+  }
+
+  function restorePreferredVolume(video) {
+    if (!video || !validVolume(preferredVolume)) return false;
+    const current = Number(logicalOf(video));
+    if (!validVolume(current) || Math.abs(current - preferredVolume) > VOLUME_EPSILON) {
+      video.volume = preferredVolume;
+      return true;
+    }
+    return false;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 1b. Регулировка через Web Audio — главное средство против треска
    *
    * Запись в video.volume из JS принципиально ступенчата: значение
    * применяется на границах аудиобуферов, поэтому быстрые изменения
@@ -273,7 +331,16 @@
   window.addEventListener('message', (e) => {
     if (e.source !== window || !e.data || e.data.type !== 'YTEV_SETTINGS') return;
     Object.assign(SETTINGS, e.data.settings);
+    if (!volumeStateLoaded && e.data.state) {
+      const savedValue = e.data.state.savedVolume;
+      const savedVolume = Number(savedValue);
+      if (!preferredVolumeDirty && savedValue != null && validVolume(savedVolume)) {
+        preferredVolume = savedVolume;
+      }
+      volumeStateLoaded = true;
+    }
     reapplyCurve();
+    restorePreferredVolume(getVideo());
     ensureUI(); // включение/выключение своей шкалы должно срабатывать сразу
     layout();
     updateUI();
@@ -320,11 +387,15 @@
       min-width: 0;
       margin: 0 8px;
       position: relative;
+      /* В актуальном интерфейсе Shorts вся строка кнопок получает
+         pointer-events:none, а свойство наследуется. Возвращаем
+         интерактивность нашему поддереву явно, иначе клик попадает в video. */
+      pointer-events: auto;
     }
     /* содержимое поверх слоя подсветки */
     .ytev-box > * { position: relative; z-index: 1; }
     /* геометрия рамки: справа поле --ytev-pad, слева меньше — значок
-       YouTube (viewBox 36×36) несёт собственные внутренние поля */
+       YouTube (viewBox 24×24) несёт собственные внутренние поля */
     .ytev-box.ytev-framed {
       padding: 0 var(--ytev-pad, 10px) 0 calc(var(--ytev-pad, 10px) * .25);
       gap: calc(var(--ytev-pad, 10px) * .5);
@@ -371,42 +442,70 @@
       margin: 0;
       color: #fff;
       cursor: pointer;
+      pointer-events: auto;
     }
     .ytev-box:not(.ytev-framed) .ytev-mute { height: 36px; }
-    .ytev-mute svg { width: 100%; height: 100%; display: block; }
-    /* Значок — один стиль, как в оригинальном плеере: заливка
-       currentColor с тонкой тёмной обводкой (paint-order: stroke даёт
-       тот же эффект, что слой .ytp-svg-shadow у YouTube) */
-    .ytev-shape {
-      fill: currentColor;
-      stroke: rgba(0, 0, 0, .15);
-      stroke-width: 2px;
-      paint-order: stroke;
+    .ytev-mute svg {
+      /* У штатной кнопки YouTube SVG 24×24 внутри зоны 36×36. */
+      width: 66.6667%;
+      height: 66.6667%;
+      display: block;
+      overflow: visible;
     }
-    /* волны появляются и уходят от рупора при переходах громкости */
+    /* Актуальные формы YouTube (viewBox 24×24). При выключении звука
+       волны за 200 мс сжимаются к своим центрам, после чего появляется
+       штатный контурный рупор с крестом. Включение идёт в обратную сторону. */
+    .ytev-speaker,
+    .ytev-wave,
+    .ytev-muted-icon { fill: currentColor; }
+    .ytev-speaker {
+      opacity: 1;
+      transition: opacity .04s linear;
+    }
     .ytev-wave {
-      transform-box: fill-box;
-      transform-origin: left center;
-      transition: opacity .13s ease, transform .13s ease;
+      opacity: 1;
+      transform: scale(1);
+      transform-box: view-box;
+      transition:
+        transform .2s cubic-bezier(.2, 0, 0, 1),
+        opacity .04s linear;
     }
-    .ytev-box[data-vol="muted"] .ytev-wave,
+    .ytev-wave-1 { transform-origin: 75% 50%; }
+    .ytev-wave-2 { transform-origin: 91.6667% 50%; }
+    .ytev-muted-icon {
+      opacity: 0;
+      transform: scale(.94);
+      transform-box: view-box;
+      transform-origin: 50% 50%;
+      transition:
+        opacity .04s linear,
+        transform .2s cubic-bezier(.2, 0, 0, 1);
+    }
+    /* На тихой громкости YouTube оставляет только внутреннюю волну. */
     .ytev-box[data-vol="low"] .ytev-wave-2 {
       opacity: 0;
-      transform: translateX(-1.5px) scale(.55);
+      transform: scale(0);
+      transition-delay: 0s, .16s;
     }
-    /* перечёркивание прочерчивается, как при отключении звука в YouTube;
-       широкий тёмный штрих под ним даёт «вырез» в рупоре */
-    .ytev-slash, .ytev-slash-cut {
-      fill: none;
-      stroke-linecap: round;
-      stroke-dasharray: 27;
-      stroke-dashoffset: 27;
-      transition: stroke-dashoffset .18s ease;
+    .ytev-box[data-vol="muted"] .ytev-speaker {
+      opacity: 0;
+      transition-delay: .16s;
     }
-    .ytev-slash-cut { stroke: rgba(0, 0, 0, .55); stroke-width: 5px; }
-    .ytev-slash { stroke: currentColor; stroke-width: 2.4px; }
-    .ytev-box[data-vol="muted"] .ytev-slash,
-    .ytev-box[data-vol="muted"] .ytev-slash-cut { stroke-dashoffset: 0; }
+    .ytev-box[data-vol="muted"] .ytev-wave {
+      opacity: 0;
+      transform: scale(0);
+      transition-delay: 0s, .16s;
+    }
+    .ytev-box[data-vol="muted"] .ytev-muted-icon {
+      opacity: 1;
+      transform: scale(1);
+      transition-delay: .16s, 0s;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ytev-speaker,
+      .ytev-wave,
+      .ytev-muted-icon { transition: none; }
+    }
     /* автосворачивание: без курсора остаётся только кнопка; переходы
        включаются лишь на время переключения (.ytev-animating), чтобы
        не мешать замерам layout() */
@@ -465,6 +564,7 @@
       outline: none;
       cursor: pointer;
       margin: 0;
+      pointer-events: auto;
     }
     .ytev-slider::-webkit-slider-thumb {
       -webkit-appearance: none;
@@ -568,7 +668,9 @@
     const state = muted ? 'muted' : pct < 50 ? 'low' : 'high';
     ui.box.dataset.vol = state;
     if (ui.muteBtn) {
-      ui.muteBtn.title = muted ? 'Включить звук (m)' : 'Отключить звук (m)';
+      const title = muted ? 'Включить звук (m)' : 'Отключить звук (m)';
+      ui.muteBtn.title = title;
+      ui.muteBtn.setAttribute('aria-label', title);
     }
     const real = toReal(pct / 100) * 100;
     ui.slider.title = SETTINGS.enabled
@@ -579,38 +681,37 @@
   /* ------------------------------------------------------------------ *
    * Значок кнопки звука
    *
-   * Один собственный значок в стиле оригинального плеера: те же формы
-   * (viewBox 36×36), та же заливка с тонкой тёмной обводкой. Клонировать
-   * SVG у штатной кнопки нельзя: в новом интерфейсе она содержит формы
-   * сразу нескольких состояний, а переключают их классы на самой кнопке
-   * — в копии все состояния накладывались друг на друга. Состояние
-   * задаётся атрибутом data-vol на блоке, переходы делает CSS.
+   * Точные формы актуального плеера YouTube (viewBox 24×24): заполненный
+   * рупор с одной/двумя волнами и отдельный контурный mute-значок с
+   * крестом. Состояние задаётся data-vol, а CSS повторяет оригинальную
+   * 200-миллисекундную анимацию схлопывания и раскрытия волн.
    * ------------------------------------------------------------------ */
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
-  // формы значка громкости из плеера YouTube (viewBox 36×36)
+  // формы значка громкости из актуального плеера YouTube (viewBox 24×24)
   const ICON = {
-    horn: 'M8,21 L12,21 L17,26 L17,10 L12,15 L8,15 L8,21 Z',
+    speaker:
+      'M 11.60 2.08 L 11.48 2.14 L 3.91 6.68 C 3.02 7.21 2.28 7.97 1.77 8.87 C 1.26 9.77 1.00 10.79 1 11.83 V 12.16 L 1.01 12.56 C 1.07 13.52 1.37 14.46 1.87 15.29 C 2.38 16.12 3.08 16.81 3.91 17.31 L 11.48 21.85 C 11.63 21.94 11.80 21.99 11.98 21.99 C 12.16 22.00 12.33 21.95 12.49 21.87 C 12.64 21.78 12.77 21.65 12.86 21.50 C 12.95 21.35 13 21.17 13 21 V 3 C 12.99 2.83 12.95 2.67 12.87 2.52 C 12.80 2.37 12.68 2.25 12.54 2.16 C 12.41 2.07 12.25 2.01 12.08 2.00 C 11.92 1.98 11.75 2.01 11.60 2.08 Z',
     wave1:
-      'M19,14 L19,22 C20.48,21.32 21.5,19.77 21.5,18 C21.5,16.26 20.48,14.74 19,14 Z',
+      'M 15.53 7.05 C 15.35 7.22 15.25 7.45 15.24 7.70 C 15.23 7.95 15.31 8.19 15.46 8.38 L 15.53 8.46 L 15.70 8.64 C 16.09 9.06 16.39 9.55 16.61 10.08 L 16.70 10.31 C 16.90 10.85 17 11.42 17 12 L 16.99 12.24 C 16.96 12.73 16.87 13.22 16.70 13.68 L 16.61 13.91 C 16.36 14.51 15.99 15.07 15.53 15.53 C 15.35 15.72 15.25 15.97 15.26 16.23 C 15.26 16.49 15.37 16.74 15.55 16.92 C 15.73 17.11 15.98 17.21 16.24 17.22 C 16.50 17.22 16.76 17.12 16.95 16.95 C 17.6 16.29 18.11 15.52 18.46 14.67 L 18.59 14.35 C 18.82 13.71 18.95 13.03 18.99 12.34 L 19 12 C 18.99 11.19 18.86 10.39 18.59 9.64 L 18.46 9.32 C 18.15 8.57 17.72 7.89 17.18 7.3 L 16.95 7.05 L 16.87 6.98 C 16.68 6.82 16.43 6.74 16.19 6.75 C 15.94 6.77 15.71 6.87 15.53 7.05 Z',
     wave2:
-      'M19,11.29 C21.89,12.15 24,14.83 24,18 C24,21.17 21.89,23.85 19,24.71 L19,26.77 C23.01,25.86 26,22.28 26,18 C26,13.72 23.01,10.14 19,9.23 L19,11.29 Z',
-    slash: 'M9,9 L27,27',
+      'M18.36 4.22 C18.18 4.39 18.08 4.62 18.07 4.87 C18.05 5.12 18.13 5.36 18.29 5.56 L18.36 5.63 L18.66 5.95 C19.36 6.72 19.91 7.60 20.31 8.55 L20.47 8.96 C20.82 9.94 21 10.96 21 11.99 L20.98 12.44 C20.94 13.32 20.77 14.19 20.47 15.03 L20.31 15.44 C19.86 16.53 19.19 17.52 18.36 18.36 C18.17 18.55 18.07 18.80 18.07 19.07 C18.07 19.33 18.17 19.59 18.36 19.77 C18.55 19.96 18.80 20.07 19.07 20.07 C19.33 20.07 19.59 19.96 19.77 19.77 C20.79 18.75 21.61 17.54 22.16 16.20 L22.35 15.70 C22.72 14.68 22.93 13.62 22.98 12.54 L23 12 C22.99 10.73 22.78 9.48 22.35 8.29 L22.16 7.79 C21.67 6.62 20.99 5.54 20.15 4.61 L19.77 4.22 L19.70 4.15 C19.51 3.99 19.26 3.91 19.02 3.93 C18.77 3.94 18.53 4.04 18.36 4.22 Z',
+    muted:
+      'M11.60 2.08L11.48 2.14L3.91 6.68C3.02 7.21 2.28 7.97 1.77 8.87C1.26 9.77 1.00 10.79 1 11.83V12.16L1.01 12.56C1.07 13.52 1.37 14.46 1.87 15.29C2.38 16.12 3.08 16.81 3.91 17.31L11.48 21.85C11.63 21.94 11.80 21.99 11.98 21.99C12.16 22.00 12.33 21.95 12.49 21.87C12.64 21.78 12.77 21.65 12.86 21.50C12.95 21.35 13 21.17 13 21V3C12.99 2.83 12.95 2.67 12.87 2.52C12.80 2.37 12.68 2.25 12.54 2.16C12.41 2.07 12.25 2.01 12.08 2.00C11.92 1.98 11.75 2.01 11.60 2.08ZM4.94 8.4V8.40L11 4.76V19.23L4.94 15.6C4.38 15.26 3.92 14.80 3.58 14.25C3.24 13.70 3.05 13.07 3.00 12.43L3 12.17V11.83C2.99 11.14 3.17 10.46 3.51 9.86C3.85 9.25 4.34 8.75 4.94 8.4ZM21.29 8.29L19 10.58L16.70 8.29L16.63 8.22C16.43 8.07 16.19 7.99 15.95 8.00C15.70 8.01 15.47 8.12 15.29 8.29C15.12 8.47 15.01 8.70 15.00 8.95C14.99 9.19 15.07 9.43 15.22 9.63L15.29 9.70L17.58 12L15.29 14.29C15.19 14.38 15.12 14.49 15.06 14.61C15.01 14.73 14.98 14.87 14.98 15.00C14.98 15.13 15.01 15.26 15.06 15.39C15.11 15.51 15.18 15.62 15.28 15.71C15.37 15.81 15.48 15.88 15.60 15.93C15.73 15.98 15.86 16.01 15.99 16.01C16.12 16.01 16.26 15.98 16.38 15.93C16.50 15.87 16.61 15.80 16.70 15.70L19 13.41L21.29 15.70L21.36 15.77C21.56 15.93 21.80 16.01 22.05 15.99C22.29 15.98 22.53 15.88 22.70 15.70C22.88 15.53 22.98 15.29 22.99 15.05C23.00 14.80 22.93 14.56 22.77 14.36L22.70 14.29L20.41 12L22.70 9.70C22.80 9.61 22.87 9.50 22.93 9.38C22.98 9.26 23.01 9.12 23.01 8.99C23.01 8.86 22.98 8.73 22.93 8.60C22.88 8.48 22.81 8.37 22.71 8.28C22.62 8.18 22.51 8.11 22.39 8.06C22.26 8.01 22.13 7.98 22.00 7.98C21.87 7.98 21.73 8.01 21.61 8.06C21.49 8.12 21.38 8.19 21.29 8.29Z',
   };
 
   function buildIcon() {
     const svg = document.createElementNS(SVG_NS, 'svg');
     svg.setAttribute('class', 'ytev-icon');
-    svg.setAttribute('viewBox', '0 0 36 36');
+    svg.setAttribute('viewBox', '0 0 24 24');
     svg.setAttribute('width', '100%');
     svg.setAttribute('height', '100%');
     svg.setAttribute('aria-hidden', 'true');
     const shapes = [
-      [ICON.horn, 'ytev-shape'],
-      [ICON.wave1, 'ytev-shape ytev-wave ytev-wave-1'],
-      [ICON.wave2, 'ytev-shape ytev-wave ytev-wave-2'],
-      [ICON.slash, 'ytev-slash-cut'],
-      [ICON.slash, 'ytev-slash'],
+      [ICON.speaker, 'ytev-speaker'],
+      [ICON.wave1, 'ytev-wave ytev-wave-1'],
+      [ICON.wave2, 'ytev-wave ytev-wave-2'],
+      [ICON.muted, 'ytev-muted-icon'],
     ];
     for (const [d, cls] of shapes) {
       const path = document.createElementNS(SVG_NS, 'path');
@@ -973,7 +1074,34 @@
     const video = getVideo();
     if (!video || video === boundVideo) return;
     boundVideo = video;
-    video.addEventListener('volumechange', updateUI);
+    const current = Number(logicalOf(video));
+    if (!validVolume(preferredVolume) && validVolume(current)) {
+      rememberVolume(current);
+    } else {
+      restorePreferredVolume(video);
+    }
+    video.addEventListener('volumechange', () => {
+      if (video !== boundVideo) return;
+      // Свою шкалу считаем источником истины. YouTube иногда заново
+      // применяет громкость при подмене потока; возвращаем сохранённую.
+      // В режиме штатной шкалы, наоборот, запоминаем выбор пользователя.
+      if (SETTINGS.useNativeSlider) {
+        const value = Number(logicalOf(video));
+        if (validVolume(value)) rememberVolume(value, true);
+      } else {
+        restorePreferredVolume(video);
+      }
+      updateUI();
+    });
+    const restoreAfterMediaChange = () => {
+      setTimeout(() => {
+        if (video !== getVideo()) return;
+        restorePreferredVolume(video);
+        updateUI();
+      }, 0);
+    };
+    video.addEventListener('loadedmetadata', restoreAfterMediaChange);
+    video.addEventListener('playing', restoreAfterMediaChange);
     updateUI();
   }
 
@@ -1347,6 +1475,7 @@
     const muteBtn = document.createElement('button');
     muteBtn.className = 'ytev-mute';
     muteBtn.type = 'button';
+    muteBtn.setAttribute('aria-keyshortcuts', 'm');
     muteBtn.appendChild(buildIcon());
     muteBtn.addEventListener('click', () => {
       const player = getPlayer();
@@ -1387,7 +1516,6 @@
       else controls.appendChild(box);
     }
 
-    slider.addEventListener('input', applySliderValue);
     // стрелки должны двигать ползунок (шаг 0.1%), а не перематывать видео
     slider.addEventListener('keydown', (e) => e.stopPropagation());
     // автосворачивание: следим за курсором и фокусом на блоке
@@ -1414,7 +1542,7 @@
         const step = e.shiftKey ? 0.1 : 1;
         const cur = Number(slider.value);
         slider.value = Math.min(100, Math.max(0, cur + (e.deltaY < 0 ? step : -step)));
-        applySliderValue();
+        applySliderValue(slider);
       },
       { passive: false }
     );
@@ -1442,15 +1570,16 @@
   // настройках YouTube делаем отложенно, один раз после конца движения
   // и только целым числом.
   let persistTimer = 0;
-  function applySliderValue() {
+  function applySliderValue(slider = ui && ui.slider) {
     const video = getVideo();
     const player = getPlayer();
-    if (!video || !ui) return;
-    const pct = Math.min(100, Math.max(0, Number(ui.slider.value)));
+    if (!video || !slider) return;
+    const pct = Math.min(100, Math.max(0, Number(slider.value)));
     if (video.muted && pct > 0) {
       if (player && typeof player.unMute === 'function') player.unMute();
       video.muted = false;
     }
+    rememberVolume(pct / 100, true);
     video.volume = pct / 100;
     clearTimeout(persistTimer);
     persistTimer = setTimeout(() => {
