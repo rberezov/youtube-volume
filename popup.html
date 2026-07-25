@@ -50,6 +50,20 @@
   </div>
 
   <div class="row">
+    <label>Длина в Shorts: <span class="value" id="shortsValue"></span>% ширины плеера</label>
+    <input type="range" id="shortsScale" min="2" max="70" step="1">
+    <div class="hint">Отдельный размер: плеер Shorts узкий, и доля от его ширины нужна своя.</div>
+  </div>
+
+  <div class="row">
+    <label>
+      <input type="checkbox" id="useNativeSlider">
+      Оставить штатную шкалу YouTube
+    </label>
+    <div class="hint">Своя шкала не строится, регулировка — обычная, но экспоненциальная кривая продолжает работать.</div>
+  </div>
+
+  <div class="row">
     <label>
       <input type="checkbox" id="showPercent">
       Показывать проценты

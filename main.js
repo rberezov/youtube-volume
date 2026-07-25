@@ -5,11 +5,13 @@
   'use strict';
 
   const SETTINGS = {
-    enabled: true,       // применять экспоненциальную кривую
-    gamma: 3,            // крутизна кривой: real = logical^gamma (1 = линейно)
-    sliderScale: 20,     // длина ползунка в % от ширины плеера
-    showPercent: true,   // подпись с процентами рядом с ползунком
-    autoCollapse: false, // сворачивать шкалу, когда курсор не на ней
+    enabled: true,          // применять экспоненциальную кривую
+    gamma: 3,               // крутизна кривой: real = logical^gamma (1 = линейно)
+    sliderScale: 20,        // длина ползунка в % от ширины плеера
+    shortsScale: 50,        // то же для Shorts — плеер узкий, размер свой
+    showPercent: true,      // подпись с процентами рядом с ползунком
+    autoCollapse: false,    // сворачивать шкалу, когда курсор не на ней
+    useNativeSlider: false, // не строить свою шкалу — оставить штатную
   };
 
   /* ------------------------------------------------------------------ *
@@ -272,6 +274,7 @@
     if (e.source !== window || !e.data || e.data.type !== 'YTEV_SETTINGS') return;
     Object.assign(SETTINGS, e.data.settings);
     reapplyCurve();
+    ensureUI(); // включение/выключение своей шкалы должно срабатывать сразу
     layout();
     updateUI();
     updateCollapsed();
@@ -293,14 +296,14 @@
        ytev-active — он ставится после успешного монтирования нашего
        блока и снимается в режиме отката. Если код расширения упадёт,
        класса не будет и штатная громкость останется на месте. */
-    #movie_player.ytev-active .ytp-volume-panel,
-    #movie_player.ytev-active .ytp-mute-button {
+    .ytev-active .ytp-volume-panel,
+    .ytev-active .ytp-mute-button {
       display: none !important;
     }
     /* при наведении YouTube резервирует ширину под выезжающий штатный
        ползунок — он скрыт, поэтому рамка раздувалась бы впустую; пока
        работает наш ползунок, запрещаем области громкости менять ширину */
-    #movie_player.ytev-active .ytp-volume-area {
+    .ytev-active .ytp-volume-area {
       width: auto !important;
       min-width: 0 !important;
       max-width: none !important;
@@ -327,6 +330,17 @@
       gap: calc(var(--ytev-pad, 10px) * .5);
     }
     .ytev-box:not(.ytev-framed) { gap: 6px; }
+    /* Shorts: своего места в интерфейсе нет — кладём блок в собственный
+       слой поверх плеера. Слой не перехватывает клики, блок — перехватывает */
+    .ytev-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 60;
+      display: flex;
+      pointer-events: none;
+    }
+    .ytev-overlay .ytev-box { pointer-events: auto; }
     /* своя кнопка звука с оригинальным значком YouTube: почти на всю
        высоту рамки, как у штатной, — сам глиф имеет поля внутри viewBox */
     .ytev-mute {
@@ -420,7 +434,7 @@
       z-index: 0;
     }
     .ytev-box.ytev-framed:hover::after { opacity: 1; }
-    #movie_player.ytp-big-mode .ytev-box {
+    .ytp-big-mode .ytev-box {
       --ytev-track: 5px;
       --ytev-thumb: 18px;
       --ytev-font: 15px;
@@ -468,8 +482,10 @@
 
   // фиксированные константы, вычисляются ОДИН раз из размеров плашки при
   // первом измерении и дальше не меняются:
-  let edgeGap = 0; // отступ по краям рамки (снаружи)
-  let hlInset = 0; // зазор слоя подсветки от рамки, одинаковый со всех сторон
+  let edgeGap = 0;     // отступ по краям рамки (снаружи)
+  let hlInset = 0;     // зазор слоя подсветки от рамки, одинаковый со всех сторон
+  let shortsGap = 0;   // то же для Shorts — там свои размеры плеера
+  let shortsInset = 0;
 
   // { box, slider, label, muteBtn, hiddenPill }
   let ui = null;
@@ -477,7 +493,20 @@
   let observedPlayer = null;
   let observedPill = null;
 
-  const getPlayer = () => document.getElementById('movie_player');
+  const isShorts = () => location.pathname.startsWith('/shorts/');
+
+  // Активный плеер: на странице Shorts это плеер текущей ленты (он один и
+  // переезжает между роликами), на обычной странице — #movie_player
+  function getPlayer() {
+    if (isShorts()) {
+      const shorts =
+        document.querySelector('ytd-reel-video-renderer[is-active] .html5-video-player') ||
+        document.querySelector('#shorts-player .html5-video-player') ||
+        document.querySelector('#shorts-player');
+      if (shorts) return shorts;
+    }
+    return document.getElementById('movie_player');
+  }
   const getVideo = () => {
     const p = getPlayer();
     return p ? p.querySelector('video') : null;
@@ -664,6 +693,28 @@
   // фоновых плашек нет — блок остаётся прозрачным.
   function syncFrameStyle() {
     const player = getPlayer();
+    // В Shorts копировать не с чего (плашек в плеере нет), поэтому рамку
+    // задаём сами — тёмная «пилюля» в стиле кнопок YouTube, размеры от
+    // ширины плеера, чтобы вписываться в любой размер окна
+    if (ui.overlay) {
+      const w = player ? player.clientWidth : 0;
+      if (!w) return;
+      const h = Math.max(30, Math.min(46, Math.round(w * 0.1)));
+      const pad = Math.max(6, Math.round(h * 0.23));
+      if (!shortsGap) shortsGap = Math.max(8, Math.round(h * 0.32));
+      if (!shortsInset) shortsInset = Math.max(3, Math.round(h * 0.09));
+      const st = ui.box.style;
+      ui.box.classList.add('ytev-framed');
+      st.background = 'rgba(0, 0, 0, .6)';
+      st.borderRadius = h / 2 + 'px';
+      st.height = h + 'px';
+      st.margin = shortsGap + 'px';
+      st.setProperty('--ytev-pad', pad + 'px');
+      st.setProperty('--ytev-hl-inset', shortsInset + 'px');
+      st.setProperty('--ytev-hl-radius', Math.max(4, Math.round(h / 2 - shortsInset)) + 'px');
+      st.backdropFilter = '';
+      return;
+    }
     const surfaces = [];
     collectSurfaces(player && player.querySelector('.ytp-time-display'), surfaces);
     collectSurfaces(player && player.querySelector('.ytp-right-controls'), surfaces);
@@ -747,6 +798,30 @@
     if (ui.box.classList.contains('ytev-animating')) return;
     const player = getPlayer();
     if (!player) return;
+
+    // Shorts: блок лежит в своём слое, соседей нет — длина считается от
+    // ширины плеера по отдельной настройке и ограничена ею же
+    if (ui.overlay) {
+      const wasFolded = ui.box.classList.contains('ytev-collapsed');
+      ui.box.classList.remove('ytev-collapsed');
+      enterNormal(player);
+      ui.label.style.display = SETTINGS.showPercent ? '' : 'none';
+      syncFrameStyle();
+      const pw = player.clientWidth;
+      if (!pw) return;
+      ui.slider.style.width = MIN_SLIDER + 'px';
+      const extra = ui.box.getBoundingClientRect().width - MIN_SLIDER;
+      const room = pw - 2 * shortsGap - extra;
+      const scale = num(SETTINGS.shortsScale) || 50;
+      const width = Math.max(MIN_SLIDER, Math.min(pw * (scale / 100), room));
+      ui.slider.style.width = Math.round(width) + 'px';
+      ui.trackW = ui.slider.getBoundingClientRect().width;
+      ui.thumbPx = num(getComputedStyle(ui.box).getPropertyValue('--ytev-thumb'));
+      updateUI();
+      if (wasFolded) updateCollapsed(false);
+      return;
+    }
+
     // строка управления — ближайший предок, в котором есть и правые кнопки
     const rightControls = player.querySelector('.ytp-right-controls');
     let row = ui.box.parentElement;
@@ -874,9 +949,50 @@
     }
   }
 
+  // Куда встраивать блок. На обычной странице — в строку управления
+  // плеера. В Shorts своей строки управления нет (у плеера минимальная
+  // обвязка, которая ещё и меняется от версии к версии), поэтому кладём
+  // блок в собственный слой поверх плеера, слева сверху — там свободно.
+  function findMount() {
+    const player = getPlayer();
+    if (!player) return null;
+    if (isShorts()) {
+      let host = player.querySelector(':scope > .ytev-overlay');
+      if (!host) {
+        host = document.createElement('div');
+        host.className = 'ytev-overlay';
+        player.appendChild(host);
+      }
+      return { host, overlay: true };
+    }
+    const controls = player.querySelector('.ytp-left-controls');
+    return controls ? { host: controls, overlay: false } : null;
+  }
+
+  // Полный демонтаж: штатная громкость возвращается на место
+  function teardownUI() {
+    for (const el of document.querySelectorAll('.ytev-active')) {
+      el.classList.remove('ytev-active');
+    }
+    if (ui && ui.hiddenPill && ui.hiddenPill.isConnected) {
+      ui.hiddenPill.style.display = '';
+    }
+    for (const box of document.querySelectorAll('.ytev-box')) box.remove();
+    for (const host of document.querySelectorAll('.ytev-overlay')) host.remove();
+    ui = null;
+    boundVideo = null;
+  }
+
   function ensureUI() {
-    const controls = document.querySelector('#movie_player .ytp-left-controls');
-    if (!controls) return;
+    // режим «штатная шкала»: свой блок не строим, но кривая продолжает
+    // работать — её применяет перехватчик громкости
+    if (SETTINGS.useNativeSlider) {
+      if (ui) teardownUI();
+      return;
+    }
+    const mount = findMount();
+    if (!mount) return;
+    const controls = mount.host;
     observePlayer();
     if (ui && controls.contains(ui.box)) {
       if (ui.hiddenPill && !ui.hiddenPill.isConnected) markDonorPill(controls);
@@ -927,13 +1043,17 @@
 
     box.append(muteBtn, slider, label);
 
-    // встаём после «пилюли» с кнопками, а не внутрь неё: YouTube управляет
-    // её шириной из скриптов под собственное содержимое, и вставленный
-    // внутрь ползунок вылезал за фон. Рамку блок рисует сам (syncFrameStyle)
-    let anchor = controls.querySelector('.ytp-volume-area, .ytp-mute-button');
-    while (anchor && anchor.parentElement !== controls) anchor = anchor.parentElement;
-    if (anchor) anchor.after(box);
-    else controls.appendChild(box);
+    if (mount.overlay) {
+      controls.appendChild(box); // свой слой поверх плеера Shorts
+    } else {
+      // встаём после «пилюли» с кнопками, а не внутрь неё: YouTube управляет
+      // её шириной из скриптов под собственное содержимое, и вставленный
+      // внутрь ползунок вылезал за фон. Рамку блок рисует сам (syncFrameStyle)
+      let anchor = controls.querySelector('.ytp-volume-area, .ytp-mute-button');
+      while (anchor && anchor.parentElement !== controls) anchor = anchor.parentElement;
+      if (anchor) anchor.after(box);
+      else controls.appendChild(box);
+    }
 
     slider.addEventListener('input', applySliderValue);
     // стрелки должны двигать ползунок (шаг 0.1%), а не перематывать видео
@@ -967,7 +1087,7 @@
       { passive: false }
     );
 
-    ui = { box, slider, label, muteBtn, hover: false };
+    ui = { box, slider, label, muteBtn, hover: false, overlay: mount.overlay };
     markDonorPill(controls);
     observeChain();
     bindVideo();

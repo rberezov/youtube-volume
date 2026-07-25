@@ -8,8 +8,10 @@
     enabled: true,
     gamma: 3,
     sliderScale: 20,
+    shortsScale: 50,
     showPercent: true,
     autoCollapse: false,
+    useNativeSlider: false,
   };
 
   function send(settings) {
