@@ -14,8 +14,8 @@
     useNativeSlider: false,
   };
 
-  function send(settings) {
-    window.postMessage({ type: 'YTEV_SETTINGS', settings }, '*');
+  function send(settings, state) {
+    window.postMessage({ type: 'YTEV_SETTINGS', settings, state }, '*');
   }
 
   // После обновления/перезагрузки расширения старый мост на уже открытой
@@ -35,14 +35,28 @@
     try {
       chrome.storage.sync.get(DEFAULTS, (settings) => {
         if (chrome.runtime.lastError) return;
-        send(settings);
+        chrome.storage.local.get({ savedVolume: null }, (state) => {
+          if (chrome.runtime.lastError) return;
+          send(settings, state);
+        });
       });
     } catch {}
   }
 
   // main.js запрашивает настройки при старте (порядок загрузки не гарантирован)
   window.addEventListener('message', (e) => {
-    if (e.source === window && e.data && e.data.type === 'YTEV_GET_SETTINGS') load();
+    if (e.source !== window || !e.data) return;
+    if (e.data.type === 'YTEV_GET_SETTINGS') {
+      load();
+      return;
+    }
+    if (e.data.type === 'YTEV_SAVE_VOLUME') {
+      const volume = Number(e.data.volume);
+      if (!Number.isFinite(volume) || volume < 0 || volume > 1 || !alive()) return;
+      try {
+        chrome.storage.local.set({ savedVolume: volume }, () => void chrome.runtime.lastError);
+      } catch {}
+    }
   });
 
   try {
