@@ -179,19 +179,103 @@ onMessage({
 assert.equal(saved.length, 2);
 assert.equal(saved[1].savedMuted, true);
 
+now += 300;
+const ownSlider = {
+  tagName: 'INPUT',
+  matches(selector) {
+    return selector === '.ytev-slider';
+  },
+  closest(selector) {
+    return selector.includes('.ytev-slider') || selector === '.ytev-box' ? this : null;
+  },
+};
+listeners.get('input')({
+  isTrusted: true,
+  target: ownSlider,
+});
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_MUTED', channel, muted: false },
+});
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 0.55 },
+});
+assert.equal(saved.length, 4, 'one slider input must authorize mute and volume saves');
+assert.equal(saved[2].savedMuted, false);
+assert.equal(saved[3].savedVolume, 0.55);
+
+now += 300;
+onKeyDown({
+  isTrusted: true,
+  defaultPrevented: false,
+  ctrlKey: false,
+  metaKey: false,
+  altKey: false,
+  repeat: false,
+  key: 'Enter',
+  target: {
+    tagName: 'BUTTON',
+    closest(selector) {
+      return selector.includes('.ytev-mute') ? this : null;
+    },
+  },
+});
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_MUTED', channel, muted: true },
+});
+assert.equal(saved.length, 5, 'Enter on the mute button must authorize mute');
+assert.equal(saved[4].savedMuted, true);
+
+now += 300;
+listeners.get('click')({
+  isTrusted: true,
+  target: {
+    closest(selector) {
+      return selector.includes('.ytev-mute') ? this : null;
+    },
+  },
+});
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_MUTED', channel, muted: false },
+});
+assert.equal(saved.length, 6, 'a trusted click must authorize mute');
+assert.equal(saved[5].savedMuted, false);
+
+listeners.get('click')({
+  isTrusted: false,
+  target: {
+    closest(selector) {
+      return selector.includes('.ytev-mute') ? this : null;
+    },
+  },
+});
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_MUTED', channel, muted: true },
+});
+assert.equal(saved.length, 6, 'a synthetic click must not authorize mute');
+
 onMessage({
   source: windowMock,
   origin: 'https://www.youtube.com',
   data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 2 },
 });
-assert.equal(saved.length, 2);
+assert.equal(saved.length, 6);
 
 onMessage({
   source: windowMock,
   origin: 'https://www.youtube.com',
   data: { type: 'YTEV_SAVE_MUTED', channel, muted: 'yes' },
 });
-assert.equal(saved.length, 2);
+assert.equal(saved.length, 6);
 
 now += 600;
 onMessage({
@@ -200,7 +284,7 @@ onMessage({
   data: { type: 'YTEV_GET_SETTINGS', channel },
 });
 assert.equal(posted.length, 2);
-assert.equal(posted[1].state.savedVolume, 0.42);
-assert.equal(posted[1].state.savedMuted, true);
+assert.equal(posted[1].state.savedVolume, 0.55);
+assert.equal(posted[1].state.savedMuted, false);
 
 console.log('bridge storage smoke test passed');

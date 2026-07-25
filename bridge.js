@@ -73,6 +73,14 @@
     mutedIntentBudget = 1;
   }
 
+  // Кастомный ползунок меняет сразу два независимых состояния:
+  // громкость и, при значении выше нуля, mute. Оба последующих сообщения
+  // main.js должны быть авторизованы одним и тем же жестом пользователя.
+  function grantSliderIntent(duration = INTENT_WINDOW_MS) {
+    grantVolumeIntent(duration);
+    grantMutedIntent(duration);
+  }
+
   function consumeVolumeIntent() {
     if (Date.now() > volumeIntentUntil || volumeIntentBudget < 1) return false;
     volumeIntentBudget -= 1;
@@ -110,9 +118,17 @@
     (e) => {
       if (!e.isTrusted || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
       const ownSlider = matches(e.target, '.ytev-slider');
+      const muteControl = closest(e.target, '.ytp-mute-button, .ytev-mute');
+      if (
+        !e.repeat &&
+        muteControl &&
+        (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar')
+      ) {
+        grantMutedIntent(5000);
+      }
       if (isEditable(e.target)) {
         if (ownSlider && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
-          grantVolumeIntent();
+          grantSliderIntent();
         }
         return;
       }
@@ -130,7 +146,7 @@
   window.addEventListener(
     'input',
     (e) => {
-      if (e.isTrusted && matches(e.target, '.ytev-slider')) grantVolumeIntent();
+      if (e.isTrusted && matches(e.target, '.ytev-slider')) grantSliderIntent();
     },
     true
   );
@@ -138,9 +154,9 @@
   window.addEventListener(
     'wheel',
     (e) => {
-      if (e.isTrusted && closest(e.target, '#movie_player, .html5-video-player')) {
-        grantVolumeIntent();
-      }
+      if (!e.isTrusted) return;
+      if (closest(e.target, '.ytev-box')) grantSliderIntent();
+      else if (closest(e.target, '#movie_player, .html5-video-player')) grantVolumeIntent();
     },
     true
   );
@@ -150,8 +166,25 @@
     (e) => {
       if (!e.isTrusted) return;
       if (closest(e.target, '.ytp-mute-button, .ytev-mute')) grantMutedIntent(5000);
-      if (closest(e.target, '.ytp-volume-area, .ytp-volume-panel, .ytev-slider')) {
+      if (closest(e.target, '.ytev-slider')) {
+        // Само trusted input ниже выдаст оба разрешения. До фактического
+        // изменения не открываем лишнее окно для записи mute.
         grantVolumeIntent(5000);
+      } else if (closest(e.target, '.ytp-volume-area, .ytp-volume-panel')) {
+        grantVolumeIntent(5000);
+      }
+    },
+    true
+  );
+
+  // Click покрывает мышь и вспомогательные технологии; Enter/Space
+  // дополнительно авторизуются выше по trusted keydown, не полагаясь на
+  // то, как конкретный браузер пометит порождённый клавиатурой click.
+  window.addEventListener(
+    'click',
+    (e) => {
+      if (e.isTrusted && closest(e.target, '.ytp-mute-button, .ytev-mute')) {
+        grantMutedIntent(5000);
       }
     },
     true
@@ -160,11 +193,9 @@
   window.addEventListener(
     'pointermove',
     (e) => {
-      if (
-        e.isTrusted &&
-        (e.buttons & 1) &&
-        closest(e.target, '.ytp-volume-area, .ytp-volume-panel, .ytev-slider')
-      ) {
+      if (!e.isTrusted || !(e.buttons & 1)) return;
+      if (closest(e.target, '.ytev-slider')) grantVolumeIntent();
+      else if (closest(e.target, '.ytp-volume-area, .ytp-volume-panel')) {
         grantVolumeIntent();
       }
     },
