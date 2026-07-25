@@ -381,10 +381,19 @@
     /* автосворачивание: без курсора остаётся только кнопка; переходы
        включаются лишь на время переключения (.ytev-animating), чтобы
        не мешать замерам layout() */
-    .ytev-box.ytev-animating { transition: gap .25s ease; }
+    .ytev-box.ytev-animating { transition: gap .25s ease, padding .25s ease; }
     .ytev-box.ytev-animating .ytev-slider { transition: width .25s ease, opacity .2s ease; }
     .ytev-box.ytev-animating .ytev-label { transition: max-width .25s ease, opacity .2s ease; }
-    .ytev-box.ytev-collapsed { gap: 0; }
+    /* Свёрнутое состояние — ровный круг со значком по центру, как
+       штатные круглые кнопки YouTube. Кнопка занимает «высота − 4px»,
+       поэтому симметричные поля по 2px дают ширину, равную высоте.
+       border-radius перебивает инлайновое скругление, скопированное с
+       плашки, поэтому !important. */
+    .ytev-box.ytev-collapsed { gap: 0; padding: 0; }
+    .ytev-box.ytev-framed.ytev-collapsed {
+      padding: 0 2px;
+      border-radius: 50% !important;
+    }
     .ytev-box.ytev-collapsed .ytev-slider {
       width: 0 !important;
       min-width: 0 !important;
