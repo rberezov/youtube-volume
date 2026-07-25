@@ -9,13 +9,14 @@ const posted = [];
 const saved = [];
 let localVolume = 0.37;
 let localMuted = false;
+let now = 1000;
 
 const windowMock = {
   addEventListener(type, listener) {
     listeners.set(type, listener);
   },
-  postMessage(message) {
-    posted.push(message);
+  postMessage(message, targetOrigin) {
+    posted.push({ ...message, targetOrigin });
   },
 };
 
@@ -55,52 +56,148 @@ const chromeMock = {
 
 const context = vm.createContext({
   chrome: chromeMock,
-  Number,
+  clearTimeout() {},
+  Date: { now: () => now },
+  location: { origin: 'https://www.youtube.com' },
   window: windowMock,
+  setTimeout(callback) {
+    callback();
+    return 1;
+  },
 });
 const source = fs.readFileSync(require.resolve('../bridge.js'), 'utf8');
 vm.runInContext(source, context, { filename: 'bridge.js' });
 
+assert.equal(posted.length, 0, 'bridge must not expose settings before a channel is bound');
+
+const onMessage = listeners.get('message');
+assert.equal(typeof onMessage, 'function');
+const channel = '0123456789abcdef0123456789abcdef';
+
+onMessage({
+  source: windowMock,
+  origin: 'https://evil.example',
+  data: { type: 'YTEV_GET_SETTINGS', channel },
+});
+assert.equal(posted.length, 0, 'messages from another origin must be ignored');
+
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_GET_SETTINGS', channel },
+});
 assert.equal(posted.length, 1);
 assert.equal(posted[0].type, 'YTEV_SETTINGS');
+assert.equal(posted[0].channel, channel);
+assert.equal(posted[0].targetOrigin, 'https://www.youtube.com');
 assert.equal(posted[0].settings.gamma, 2.5);
 assert.equal(posted[0].settings.enabled, true);
 assert.equal(posted[0].settings.shortsScale, 70);
 assert.equal(posted[0].state.savedVolume, 0.37);
 assert.equal(posted[0].state.savedMuted, false);
 
-const onMessage = listeners.get('message');
-assert.equal(typeof onMessage, 'function');
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 0.42 },
+});
+assert.equal(saved.length, 0, 'a save without trusted user intent must be ignored');
+
+const onKeyDown = listeners.get('keydown');
+onKeyDown({
+  isTrusted: false,
+  defaultPrevented: false,
+  ctrlKey: false,
+  metaKey: false,
+  altKey: false,
+  repeat: false,
+  key: 'ArrowUp',
+  target: {
+    tagName: 'DIV',
+    closest(selector) {
+      return selector.includes('#movie_player') ? this : null;
+    },
+  },
+});
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 0.42 },
+});
+assert.equal(saved.length, 0, 'a synthetic event must not authorize a save');
+
+onKeyDown({
+  isTrusted: true,
+  defaultPrevented: false,
+  ctrlKey: false,
+  metaKey: false,
+  altKey: false,
+  repeat: false,
+  key: 'ArrowUp',
+  target: {
+    tagName: 'DIV',
+    closest(selector) {
+      return selector.includes('#movie_player') ? this : null;
+    },
+  },
+});
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: {
+    type: 'YTEV_SAVE_VOLUME',
+    channel: 'ffffffffffffffffffffffffffffffff',
+    volume: 0.99,
+  },
+});
+assert.equal(saved.length, 0, 'another channel must not consume trusted intent');
 
 onMessage({
   source: windowMock,
-  data: { type: 'YTEV_SAVE_VOLUME', volume: 0.42 },
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 0.42 },
 });
 assert.equal(saved.length, 1);
 assert.equal(saved[0].savedVolume, 0.42);
 
+now += 300;
+onKeyDown({
+  isTrusted: true,
+  defaultPrevented: false,
+  ctrlKey: false,
+  metaKey: false,
+  altKey: false,
+  repeat: false,
+  key: 'm',
+  target: { tagName: 'DIV' },
+});
 onMessage({
   source: windowMock,
-  data: { type: 'YTEV_SAVE_MUTED', muted: true },
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_MUTED', channel, muted: true },
 });
 assert.equal(saved.length, 2);
 assert.equal(saved[1].savedMuted, true);
 
 onMessage({
   source: windowMock,
-  data: { type: 'YTEV_SAVE_VOLUME', volume: 2 },
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 2 },
 });
 assert.equal(saved.length, 2);
 
 onMessage({
   source: windowMock,
-  data: { type: 'YTEV_SAVE_MUTED', muted: 'yes' },
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_MUTED', channel, muted: 'yes' },
 });
 assert.equal(saved.length, 2);
 
+now += 600;
 onMessage({
   source: windowMock,
-  data: { type: 'YTEV_GET_SETTINGS' },
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_GET_SETTINGS', channel },
 });
 assert.equal(posted.length, 2);
 assert.equal(posted[1].state.savedVolume, 0.42);

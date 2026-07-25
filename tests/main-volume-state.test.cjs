@@ -116,11 +116,19 @@ function addListener(map, type, listener) {
 }
 
 const windowMock = {
+  crypto: {
+    getRandomValues(values) {
+      for (let index = 0; index < values.length; index += 1) {
+        values[index] = index + 1;
+      }
+      return values;
+    },
+  },
   addEventListener(type, listener) {
     addListener(windowListeners, type, listener);
   },
-  postMessage(message) {
-    posted.push(message);
+  postMessage(message, targetOrigin) {
+    posted.push({ ...message, targetOrigin });
   },
 };
 
@@ -174,7 +182,7 @@ const context = vm.createContext({
       storage.set(key, value);
     },
   },
-  location: { pathname: '/watch' },
+  location: { origin: 'https://www.youtube.com', pathname: '/watch' },
   performance: { now: () => clock },
   requestAnimationFrame(callback) {
     callback();
@@ -195,10 +203,29 @@ const source = fs.readFileSync(require.resolve('../main.js'), 'utf8');
 vm.runInContext(source, context, { filename: 'main.js' });
 
 const onMessage = windowListeners.get('message')[0];
+const initialRequest = posted.find((message) => message.type === 'YTEV_GET_SETTINGS');
+const channel = initialRequest.channel;
+assert.match(channel, /^[a-f0-9]{32}$/);
+assert.equal(initialRequest.targetOrigin, 'https://www.youtube.com');
+
 onMessage({
   source: windowMock,
+  origin: 'https://www.youtube.com',
   data: {
     type: 'YTEV_SETTINGS',
+    channel: '00000000000000000000000000000000',
+    settings: { useNativeSlider: true },
+    state: { savedVolume: 0.9, savedMuted: true },
+  },
+});
+assert.equal(videoA.volume, 0.2, 'a forged settings channel must be ignored');
+
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: {
+    type: 'YTEV_SETTINGS',
+    channel,
     settings: { useNativeSlider: true },
     state: { savedVolume: 0.4, savedMuted: false },
   },
@@ -219,8 +246,10 @@ assert.equal(videoA.volume, 0.6, 'keyboard volume should become the preferred va
 
 onMessage({
   source: windowMock,
+  origin: 'https://www.youtube.com',
   data: {
     type: 'YTEV_SETTINGS',
+    channel,
     settings: { useNativeSlider: true },
     state: { savedVolume: 0.4, savedMuted: false },
   },

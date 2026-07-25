@@ -4,6 +4,10 @@
 (() => {
   'use strict';
 
+  const PAGE_ORIGIN = location.origin;
+  const CHANNEL_ID = Array.from(window.crypto.getRandomValues(new Uint8Array(16)), (v) =>
+    v.toString(16).padStart(2, '0')
+  ).join('');
   const INSTANCE_KEY = Symbol.for('ytev.main.instance.v1');
   if (window[INSTANCE_KEY]) return;
   Object.defineProperty(window, INSTANCE_KEY, {
@@ -198,7 +202,10 @@
     cachePreferredState();
     clearTimeout(saveVolumeTimer);
     saveVolumeTimer = setTimeout(() => {
-      window.postMessage({ type: 'YTEV_SAVE_VOLUME', volume }, '*');
+      window.postMessage(
+        { type: 'YTEV_SAVE_VOLUME', channel: CHANNEL_ID, volume },
+        PAGE_ORIGIN
+      );
     }, 250);
   }
 
@@ -210,7 +217,10 @@
     cachePreferredState();
     clearTimeout(saveMutedTimer);
     saveMutedTimer = setTimeout(() => {
-      window.postMessage({ type: 'YTEV_SAVE_MUTED', muted }, '*');
+      window.postMessage(
+        { type: 'YTEV_SAVE_MUTED', channel: CHANNEL_ID, muted },
+        PAGE_ORIGIN
+      );
     }, 250);
   }
 
@@ -545,7 +555,15 @@
 
   let settingsReceived = false;
   window.addEventListener('message', (e) => {
-    if (e.source !== window || !e.data || e.data.type !== 'YTEV_SETTINGS') return;
+    if (
+      e.source !== window ||
+      e.origin !== PAGE_ORIGIN ||
+      !e.data ||
+      e.data.type !== 'YTEV_SETTINGS' ||
+      e.data.channel !== CHANNEL_ID
+    ) {
+      return;
+    }
     applySettings(e.data.settings);
     settingsReceived = true;
     if (!volumeStateLoaded) {
@@ -575,7 +593,10 @@
     updateUI();
     updateCollapsed();
   });
-  window.postMessage({ type: 'YTEV_GET_SETTINGS' }, '*');
+  window.postMessage(
+    { type: 'YTEV_GET_SETTINGS', channel: CHANNEL_ID },
+    PAGE_ORIGIN
+  );
 
   /* ------------------------------------------------------------------ *
    * 3. Длинный точный ползунок в панели плеера
@@ -1881,7 +1902,10 @@
     bindVideo();
     ensureUI();
     if (!settingsReceived) {
-      window.postMessage({ type: 'YTEV_GET_SETTINGS' }, '*');
+      window.postMessage(
+        { type: 'YTEV_GET_SETTINGS', channel: CHANNEL_ID },
+        PAGE_ORIGIN
+      );
     }
   }, 1000);
   const refreshAfterNavigation = () =>
