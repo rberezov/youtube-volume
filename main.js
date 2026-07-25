@@ -750,6 +750,26 @@
       st.backdropFilter = '';
       return;
     }
+    // строка кнопок Shorts: копируем оформление штатного блока громкости
+    if (isShorts() && shortsFrame) {
+      const st = ui.box.style;
+      const h = shortsFrame.height;
+      const pad = Math.max(6, Math.round(h * 0.23));
+      if (!shortsInset) shortsInset = Math.max(3, Math.round(h * 0.09));
+      ui.box.classList.add('ytev-framed');
+      st.background = shortsFrame.bg;
+      st.borderRadius = shortsFrame.radius;
+      st.height = h + 'px';
+      st.margin = '0';
+      st.setProperty('--ytev-pad', pad + 'px');
+      st.setProperty('--ytev-hl-inset', shortsInset + 'px');
+      st.setProperty(
+        '--ytev-hl-radius',
+        Math.max(4, Math.round((parseFloat(shortsFrame.radius) || h / 2) - shortsInset)) + 'px'
+      );
+      st.backdropFilter = '';
+      return;
+    }
     const surfaces = [];
     collectSurfaces(player && player.querySelector('.ytp-time-display'), surfaces);
     collectSurfaces(player && player.querySelector('.ytp-right-controls'), surfaces);
@@ -834,9 +854,10 @@
     const player = getPlayer();
     if (!player) return;
 
-    // Shorts: блок лежит в своём слое, соседей нет — длина считается от
-    // ширины плеера по отдельной настройке и ограничена ею же
-    if (ui.overlay) {
+    // Shorts: блок стоит либо в строке кнопок самого Shorts (она вне
+    // элемента плеера, соседей для расчёта нет), либо в своём слое —
+    // длину в обоих случаях берём от ширины плеера по своей настройке
+    if (ui.overlay || ui.shortsRow) {
       const wasFolded = ui.box.classList.contains('ytev-collapsed');
       ui.box.classList.remove('ytev-collapsed');
       enterNormal(player);
@@ -848,14 +869,20 @@
       if (!pw) return;
       ui.slider.style.width = MIN_SLIDER + 'px';
       const extra = ui.box.getBoundingClientRect().width - MIN_SLIDER;
-      const room = pw - 2 * shortsGap - extra;
+      // в строке кнопок место считаем от её левого края до края плеера
+      const room = ui.overlay
+        ? pw - 2 * shortsGap - extra
+        : player.getBoundingClientRect().right -
+          ui.box.parentElement.getBoundingClientRect().left -
+          extra -
+          16;
       const width = Math.max(MIN_SLIDER, Math.min(pw * (activeScale() / 100), room));
       ui.slider.style.width = Math.round(width) + 'px';
       ui.trackW = ui.slider.getBoundingClientRect().width;
       ui.thumbPx = num(getComputedStyle(ui.box).getPropertyValue('--ytev-thumb'));
       updateUI();
       if (wasFolded) updateCollapsed(false);
-      positionOverlay();
+      if (ui.overlay) positionOverlay();
       return;
     }
 
@@ -994,12 +1021,22 @@
   function findMount() {
     const player = getPlayer();
     if (!player) return null;
-    // Сначала штатная строка управления — она есть и в Shorts (кнопки
-    // паузы и звука рядом с полосой перемотки). Так блок встаёт ровно
-    // туда, где было штатное управление, и живёт по правилам YouTube,
-    // включая автоскрытие панели. Исключение — если в Shorts полоса
-    // перемотки размещена поверх строки: тогда наша шкала легла бы на
-    // неё внахлёст, и мы уходим в накладной слой (см. checkRowOverlap).
+    // В Shorts лучшее место — строка кнопок самого Shorts
+    // (ytd-shorts-player-controls): встаём в неё рядом с паузой, ровно
+    // на место штатного блока громкости, и наследуем его поведение,
+    // включая автоскрытие вместе с остальными кнопками.
+    if (isShorts()) {
+      const volumeHost = shortsVolumeHost();
+      const row = volumeHost && volumeHost.parentElement;
+      if (row) {
+        captureShortsFrame(volumeHost);
+        shortsMountAnchor = volumeHost;
+        return { host: row, before: volumeHost, overlay: false };
+      }
+    }
+    // Иначе штатная строка управления плеера. Исключение — если в Shorts
+    // полоса перемотки размещена поверх строки: тогда наша шкала легла бы
+    // на неё внахлёст, и мы уходим в накладной слой (см. checkRowOverlap).
     const controls = player.querySelector('.ytp-left-controls');
     if (controls && controls.clientWidth && !(isShorts() && shortsRowUnusable)) {
       return { host: controls, overlay: false };
@@ -1082,7 +1119,9 @@
    * ------------------------------------------------------------------ */
 
   const hiddenNative = new Set();
-  const VOLUME_HINT = /(^|[^a-z])(volume|mute)/i;
+  // в новом интерфейсе классы в camelCase (ytdVolumeControlsHost), поэтому
+  // без требования не-буквы перед словом — иначе такие имена не находились
+  const VOLUME_HINT = /volume|mute/i;
   // место штатной кнопки звука в долях размера плеера — на него встаёт
   // наш блок, поэтому доли, а не пиксели: переживает смену размеров
   let shortsAnchor = null;
@@ -1092,10 +1131,57 @@
     el.getAttribute('role') === 'button' ||
     Math.abs(r.width - r.height) < 12;
 
-  const shortsScope = () =>
+  // активная лента: атрибута is-active в новом интерфейсе нет, зато
+  // отрисованная лента лежит в #reel-overlay-container
+  const activeReel = () =>
     document.querySelector('ytd-reel-video-renderer[is-active]') ||
+    document.querySelector('#reel-overlay-container ytd-reel-video-renderer') ||
+    document.querySelector('ytd-reel-video-renderer');
+
+  const shortsScope = () =>
+    activeReel() ||
     document.querySelector('#shorts-container') ||
     document.querySelector('ytd-shorts');
+
+  // Оформление снимаем со штатного блока громкости Shorts до того, как
+  // его скроем: фон там рисует вложенный «скрим», поэтому ищем первый
+  // элемент с непрозрачным фоном
+  let shortsFrame = null;
+  function captureShortsFrame(el) {
+    if (shortsFrame || !el) return;
+    const rect = el.getBoundingClientRect();
+    if (!rect.height) return;
+    let painted = null;
+    for (const node of [el, ...el.querySelectorAll('*')]) {
+      const s = getComputedStyle(node);
+      if (s.display !== 'none' && !isTransparentBg(s.backgroundColor)) {
+        painted = s;
+        break;
+      }
+    }
+    shortsFrame = {
+      bg: painted ? painted.backgroundColor : 'rgba(0, 0, 0, .6)',
+      radius: painted ? painted.borderRadius : Math.round(rect.height / 2) + 'px',
+      height: Math.round(rect.height),
+    };
+  }
+
+  // Штатный блок громкости Shorts — <volume-controls> в строке кнопок
+  // ytd-shorts-player-controls; он лежит вне элемента плеера
+  let shortsMountAnchor = null; // рядом с ним стоим; помним и после скрытия
+  function shortsVolumeHost() {
+    // Мы сами скрываем штатный блок, и по размерам его больше не найти —
+    // поэтому держим ссылку. Без этого точка монтирования «терялась»
+    // после первого же тика, и блок скакал между строкой и слоем.
+    if (shortsMountAnchor && shortsMountAnchor.isConnected) return shortsMountAnchor;
+    const reel = activeReel() || document;
+    const el =
+      reel.querySelector('volume-controls, .ytdVolumeControlsHost') ||
+      reel.querySelector('ytd-shorts-player-controls [class*="volume" i]');
+    if (!el) return null;
+    if (hiddenNative.has(el)) return el; // спрятан нами — всё равно годится
+    return el.getBoundingClientRect().width ? el : null;
+  }
 
   function hideNativeVolume() {
     const scope = shortsScope();
@@ -1147,6 +1233,7 @@
     }
     hiddenNative.clear();
     shortsAnchor = null;
+    shortsMountAnchor = null;
   }
 
   // Ставим блок ровно на место штатной кнопки звука: совмещаем центр
@@ -1286,7 +1373,9 @@
 
     box.append(muteBtn, slider, label);
 
-    if (mount.overlay) {
+    if (mount.before && mount.before.isConnected) {
+      mount.before.after(box); // ровно на место штатного блока громкости
+    } else if (mount.overlay) {
       controls.appendChild(box); // свой слой поверх плеера Shorts
     } else {
       // встаём после «пилюли» с кнопками, а не внутрь неё: YouTube управляет
@@ -1330,7 +1419,12 @@
       { passive: false }
     );
 
-    ui = { box, slider, label, muteBtn, hover: false, overlay: mount.overlay };
+    ui = {
+      box, slider, label, muteBtn,
+      hover: false,
+      overlay: mount.overlay,
+      shortsRow: !!mount.before,
+    };
     markDonorPill(controls);
     observeChain();
     bindVideo();
