@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Exponential Volume",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "Экспоненциальная регулировка громкости в YouTube и удлинённый точный ползунок вместо стандартного.",
   "permissions": ["storage"],
   "action": {

@@ -44,8 +44,18 @@
         nativeDesc.set.call(this, value);
         return;
       }
+      const prev = logicalVolume.get(this);
       logicalVolume.set(this, v);
       applyReal(this, toReal(v));
+      // Когда уровень задаёт усилитель Web Audio, громкость самого
+      // элемента не меняется — и браузер не шлёт volumechange. Без него
+      // замер бы весь интерфейс: проценты, заливка шкалы, значок, да и
+      // собственные подсказки YouTube. Шлём событие сами; условие
+      // «значение изменилось» исключает зацикливание, если обработчик
+      // в ответ запишет ту же громкость.
+      if (prev !== v && audio.nodes.has(this)) {
+        this.dispatchEvent(new Event('volumechange'));
+      }
     },
   });
 
@@ -335,15 +345,39 @@
     }
     .ytev-box:not(.ytev-framed) .ytev-mute { height: 36px; }
     .ytev-mute svg { width: 100%; height: 100%; display: block; }
-    /* заливка и тень-обводка значка — те же, что у .ytp-svg-fill и
-       .ytp-svg-shadow в плеере YouTube */
-    .ytev-icon-fill { fill: currentColor; }
-    .ytev-icon-shadow {
-      fill: none;
-      stroke: #000;
-      stroke-opacity: .15;
+    /* Значок — один стиль, как в оригинальном плеере: заливка
+       currentColor с тонкой тёмной обводкой (paint-order: stroke даёт
+       тот же эффект, что слой .ytp-svg-shadow у YouTube) */
+    .ytev-shape {
+      fill: currentColor;
+      stroke: rgba(0, 0, 0, .15);
       stroke-width: 2px;
+      paint-order: stroke;
     }
+    /* волны появляются и уходят от рупора при переходах громкости */
+    .ytev-wave {
+      transform-box: fill-box;
+      transform-origin: left center;
+      transition: opacity .13s ease, transform .13s ease;
+    }
+    .ytev-box[data-vol="muted"] .ytev-wave,
+    .ytev-box[data-vol="low"] .ytev-wave-2 {
+      opacity: 0;
+      transform: translateX(-1.5px) scale(.55);
+    }
+    /* перечёркивание прочерчивается, как при отключении звука в YouTube;
+       широкий тёмный штрих под ним даёт «вырез» в рупоре */
+    .ytev-slash, .ytev-slash-cut {
+      fill: none;
+      stroke-linecap: round;
+      stroke-dasharray: 27;
+      stroke-dashoffset: 27;
+      transition: stroke-dashoffset .18s ease;
+    }
+    .ytev-slash-cut { stroke: rgba(0, 0, 0, .55); stroke-width: 5px; }
+    .ytev-slash { stroke: currentColor; stroke-width: 2.4px; }
+    .ytev-box[data-vol="muted"] .ytev-slash,
+    .ytev-box[data-vol="muted"] .ytev-slash-cut { stroke-dashoffset: 0; }
     /* автосворачивание: без курсора остаётся только кнопка; переходы
        включаются лишь на время переключения (.ytev-animating), чтобы
        не мешать замерам layout() */
@@ -442,9 +476,17 @@
 
   const fmt = (pct) => (pct > 0 && pct < 10 ? pct.toFixed(1) : Math.round(pct)) + '%';
 
+  // Центр бегунка ходит не по всей ширине дорожки, а в пределах
+  // [thumb/2, width − thumb/2], поэтому заливка «в процентах от ширины»
+  // отставала от бегунка тем сильнее, чем ближе к краям. Считаем границу
+  // заливки по фактическому положению центра.
   function paint(pct) {
+    const w = ui.trackW || ui.slider.getBoundingClientRect().width;
+    const thumb = ui.thumbPx || 13;
+    const edge =
+      w > thumb ? ((thumb / 2 + (pct / 100) * (w - thumb)) / w) * 100 : pct;
     ui.slider.style.background =
-      `linear-gradient(to right, #fff 0% ${pct}%, rgba(255,255,255,.3) ${pct}% 100%)`;
+      `linear-gradient(to right, #fff 0% ${edge}%, rgba(255,255,255,.3) ${edge}% 100%)`;
   }
 
   function updateUI() {
@@ -461,7 +503,6 @@
     ui.box.dataset.vol = state;
     if (ui.muteBtn) {
       ui.muteBtn.title = muted ? 'Включить звук (m)' : 'Отключить звук (m)';
-      updateIcon(state);
     }
     const real = toReal(pct / 100) * 100;
     ui.slider.title = SETTINGS.enabled
@@ -472,108 +513,46 @@
   /* ------------------------------------------------------------------ *
    * Значок кнопки звука
    *
-   * Основной путь — клонировать SVG прямо из штатной (скрытой) кнопки
-   * плеера: дизайн совпадает с точностью до пикселя, включая
-   * тень-обводку, и переживёт обновления интерфейса YouTube. Если
-   * штатный значок не отражает состояние (одинаковый рисунок при
-   * включённом и выключенном звуке — YouTube не обновляет скрытую
-   * кнопку), переходим на встроенную копию с оригинальными путями
-   * плеера.
+   * Один собственный значок в стиле оригинального плеера: те же формы
+   * (viewBox 36×36), та же заливка с тонкой тёмной обводкой. Клонировать
+   * SVG у штатной кнопки нельзя: в новом интерфейсе она содержит формы
+   * сразу нескольких состояний, а переключают их классы на самой кнопке
+   * — в копии все состояния накладывались друг на друга. Состояние
+   * задаётся атрибутом data-vol на блоке, переходы делает CSS.
    * ------------------------------------------------------------------ */
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
-  const XLINK_NS = 'http://www.w3.org/1999/xlink';
-  // оригинальные пути значка громкости YouTube (viewBox 36×36)
+  // формы значка громкости из плеера YouTube (viewBox 36×36)
   const ICON = {
     horn: 'M8,21 L12,21 L17,26 L17,10 L12,15 L8,15 L8,21 Z',
     wave1:
       'M19,14 L19,22 C20.48,21.32 21.5,19.77 21.5,18 C21.5,16.26 20.48,14.74 19,14 Z',
     wave2:
       'M19,11.29 C21.89,12.15 24,14.83 24,18 C24,21.17 21.89,23.85 19,24.71 L19,26.77 C23.01,25.86 26,22.28 26,18 C26,13.72 23.01,10.14 19,9.23 L19,11.29 Z',
-    muted:
-      'M21.48,17.98 c0,-1.77 -1.02,-3.29 -2.5,-4.03 v2.21 l2.45,2.45 c.03,-.2 .05,-.41 .05,-.63 z m2.5,0 c0,.94 -.2,1.82 -.54,2.64 l1.51,1.51 c.66,-1.24 1.03,-2.65 1.03,-4.15 0,-4.28 -2.99,-7.86 -7,-8.76 v2.05 c2.89,.86 5,3.54 5,6.71 z M9.25,8.98 L7.98,10.24 l4.72,4.73 H7.98 v6 H11.98 l5,5 v-6.73 l4.25,4.25 c-.67,.52 -1.42,.93 -2.25,1.18 v2.06 c1.38,-.31 2.63,-.95 3.69,-1.81 l2.04,2.05 1.27,-1.27 -9,-9 -7.72,-7.72 z',
+    slash: 'M9,9 L27,27',
   };
 
-  let cloneUnreliable = false;
-  let clonedSig = '';
-  let sigMuted = '';
-  let sigLoud = '';
-  let idSeq = 0;
-
-  const iconSignature = (svg) =>
-    [...svg.querySelectorAll('path')].map((p) => p.getAttribute('d') || '').join('|');
-
-  function cloneNativeIcon(native) {
-    const copy = native.cloneNode(true);
-    copy.setAttribute('width', '100%');
-    copy.setAttribute('height', '100%');
-    copy.style.pointerEvents = 'none';
-    // переименовываем id: дубликаты с оригиналом ломают ссылки <use>
-    const renamed = new Map();
-    for (const el of copy.querySelectorAll('[id]')) {
-      const fresh = 'ytev-icon-' + idSeq++;
-      renamed.set('#' + el.id, '#' + fresh);
-      el.id = fresh;
+  function buildIcon() {
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'ytev-icon');
+    svg.setAttribute('viewBox', '0 0 36 36');
+    svg.setAttribute('width', '100%');
+    svg.setAttribute('height', '100%');
+    svg.setAttribute('aria-hidden', 'true');
+    const shapes = [
+      [ICON.horn, 'ytev-shape'],
+      [ICON.wave1, 'ytev-shape ytev-wave ytev-wave-1'],
+      [ICON.wave2, 'ytev-shape ytev-wave ytev-wave-2'],
+      [ICON.slash, 'ytev-slash-cut'],
+      [ICON.slash, 'ytev-slash'],
+    ];
+    for (const [d, cls] of shapes) {
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('class', cls);
+      path.setAttribute('d', d);
+      svg.appendChild(path);
     }
-    for (const use of copy.querySelectorAll('use')) {
-      const href = use.getAttribute('href');
-      const xhref = use.getAttributeNS(XLINK_NS, 'href');
-      if (href && renamed.has(href)) use.setAttribute('href', renamed.get(href));
-      if (xhref && renamed.has(xhref)) {
-        use.setAttributeNS(XLINK_NS, 'href', renamed.get(xhref));
-      }
-    }
-    ui.muteBtn.replaceChildren(copy);
-  }
-
-  function buildOwnIcon(state) {
-    let svg = ui.muteBtn.querySelector('svg.ytev-icon');
-    if (!svg) {
-      svg = document.createElementNS(SVG_NS, 'svg');
-      svg.setAttribute('class', 'ytev-icon');
-      svg.setAttribute('viewBox', '0 0 36 36');
-      svg.setAttribute('width', '100%');
-      svg.setAttribute('height', '100%');
-      svg.setAttribute('aria-hidden', 'true');
-      for (const cls of ['ytev-icon-shadow', 'ytev-icon-fill']) {
-        const path = document.createElementNS(SVG_NS, 'path');
-        path.setAttribute('class', cls);
-        svg.appendChild(path);
-      }
-      ui.muteBtn.replaceChildren(svg);
-    }
-    const d =
-      state === 'muted'
-        ? ICON.muted
-        : state === 'low'
-          ? ICON.horn + ' ' + ICON.wave1
-          : ICON.horn + ' ' + ICON.wave1 + ' ' + ICON.wave2;
-    for (const path of svg.children) path.setAttribute('d', d);
-  }
-
-  function updateIcon(state) {
-    if (!ui || !ui.muteBtn) return;
-    const player = getPlayer();
-    const native = player && player.querySelector('.ytp-mute-button svg');
-    if (native && !cloneUnreliable) {
-      const sig = iconSignature(native);
-      if (sig) {
-        // проверка на «застывший» штатный значок: если при выключенном и
-        // включённом звуке рисунок один и тот же — копировать нельзя
-        if (state === 'muted') sigMuted = sig;
-        else sigLoud = sig;
-        if (sigMuted && sigLoud && sigMuted === sigLoud) {
-          cloneUnreliable = true;
-        } else {
-          if (sig !== clonedSig) {
-            clonedSig = sig;
-            cloneNativeIcon(native);
-          }
-          return;
-        }
-      }
-    }
-    buildOwnIcon(state);
+    return svg;
   }
 
   const num = (v) => parseFloat(v) || 0;
@@ -798,6 +777,11 @@
     ui.slider.style.width =
       Math.round(Math.max(MIN_SLIDER, Math.min(desired, free))) + 'px';
 
+    // размеры дорожки и бегунка для расчёта заливки (см. paint)
+    ui.trackW = ui.slider.getBoundingClientRect().width;
+    ui.thumbPx = num(getComputedStyle(ui.box).getPropertyValue('--ytev-thumb'));
+    updateUI();
+
     // подстраховка на случай неточного замера: если flex всё-таки сжал
     // ползунок до бесполезной длины — отдаём место штатному
     if (ui.slider.getBoundingClientRect().width < MIN_SLIDER - 1) {
@@ -904,11 +888,11 @@
     const box = document.createElement('div');
     box.className = 'ytev-box';
 
-    // Своя кнопка звука: значок предсказуемо центрирован при любом
-    // размере, а рисунок берётся у самого YouTube (см. updateIcon)
+    // Своя кнопка звука: значок предсказуемо центрирован при любом размере
     const muteBtn = document.createElement('button');
     muteBtn.className = 'ytev-mute';
     muteBtn.type = 'button';
+    muteBtn.appendChild(buildIcon());
     muteBtn.addEventListener('click', () => {
       const player = getPlayer();
       const video = getVideo();
