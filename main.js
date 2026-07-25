@@ -330,6 +330,13 @@
       gap: calc(var(--ytev-pad, 10px) * .5);
     }
     .ytev-box:not(.ytev-framed) { gap: 6px; }
+    /* Если штатная кнопка звука была у правого края (обычное место в
+       Shorts), шкала разворачивается влево — кнопка остаётся на своём
+       месте, как у штатной выезжающей панели */
+    .ytev-box.ytev-mirrored { flex-direction: row-reverse; }
+    .ytev-box.ytev-framed.ytev-mirrored:not(.ytev-collapsed) {
+      padding: 0 calc(var(--ytev-pad, 10px) * .25) 0 var(--ytev-pad, 10px);
+    }
     /* Shorts: своего места в интерфейсе нет — кладём блок в собственный
        слой поверх плеера. Слой не перехватывает клики, блок — перехватывает */
     .ytev-overlay {
@@ -708,7 +715,7 @@
       st.background = 'rgba(0, 0, 0, .6)';
       st.borderRadius = h / 2 + 'px';
       st.height = h + 'px';
-      st.margin = shortsGap + 'px';
+      st.margin = '0'; // положение задаёт слой (positionOverlay)
       st.setProperty('--ytev-pad', pad + 'px');
       st.setProperty('--ytev-hl-inset', shortsInset + 'px');
       st.setProperty('--ytev-hl-radius', Math.max(4, Math.round(h / 2 - shortsInset)) + 'px');
@@ -806,6 +813,8 @@
       ui.box.classList.remove('ytev-collapsed');
       enterNormal(player);
       ui.label.style.display = SETTINGS.showPercent ? '' : 'none';
+      // кнопка у правого края — раскрываемся влево
+      ui.box.classList.toggle('ytev-mirrored', !!shortsAnchor && shortsAnchor.fx > 0.5);
       syncFrameStyle();
       const pw = player.clientWidth;
       if (!pw) return;
@@ -819,6 +828,7 @@
       ui.thumbPx = num(getComputedStyle(ui.box).getPropertyValue('--ytev-thumb'));
       updateUI();
       if (wasFolded) updateCollapsed(false);
+      positionOverlay();
       return;
     }
 
@@ -961,6 +971,10 @@
       if (!host) {
         host = document.createElement('div');
         host.className = 'ytev-overlay';
+        // слой позиционируется от плеера — он должен быть точкой отсчёта
+        if (getComputedStyle(player).position === 'static') {
+          player.style.position = 'relative';
+        }
         player.appendChild(host);
       }
       return { host, overlay: true };
@@ -983,6 +997,14 @@
 
   const hiddenNative = new Set();
   const VOLUME_HINT = /(^|[^a-z])(volume|mute)/i;
+  // место штатной кнопки звука в долях размера плеера — на него встаёт
+  // наш блок, поэтому доли, а не пиксели: переживает смену размеров
+  let shortsAnchor = null;
+
+  const isButtonLike = (el, r) =>
+    el.tagName === 'BUTTON' ||
+    el.getAttribute('role') === 'button' ||
+    Math.abs(r.width - r.height) < 12;
 
   const shortsScope = () =>
     document.querySelector('ytd-reel-video-renderer[is-active]') ||
@@ -992,6 +1014,8 @@
   function hideNativeVolume() {
     const scope = shortsScope();
     if (!scope) return;
+    const player = getPlayer();
+    const pr = player ? player.getBoundingClientRect() : null;
     const candidates = scope.querySelectorAll(
       '.ytp-mute-button, .ytp-volume-panel, .ytp-volume-area,' +
         '[class*="volume" i], [class*="mute" i], [id*="volume" i], [id*="mute" i]'
@@ -1004,6 +1028,13 @@
       const r = el.getBoundingClientRect();
       if (!r.width || !r.height) continue; // уже не видно
       if (r.width > 160 || r.height > 160) continue; // это контейнер, не кнопка
+      // запоминаем место кнопки, пока она видна: туда встанет наш блок
+      if (!shortsAnchor && pr && pr.width && pr.height && isButtonLike(el, r)) {
+        shortsAnchor = {
+          fx: (r.left + r.width / 2 - pr.left) / pr.width,
+          fy: (r.top + r.height / 2 - pr.top) / pr.height,
+        };
+      }
       el.dataset.ytevHidden = '1';
       el.style.display = 'none';
       hiddenNative.add(el);
@@ -1018,6 +1049,47 @@
       }
     }
     hiddenNative.clear();
+    shortsAnchor = null;
+  }
+
+  // Ставим блок ровно на место штатной кнопки звука: совмещаем центр
+  // нашей кнопки с запомненным центром штатной, а шкала разворачивается
+  // вправо — как выезжает штатная. Если запомнить не удалось, кладём в
+  // угол плеера с обычным отступом.
+  function positionOverlay() {
+    if (!ui || !ui.overlay) return;
+    const player = getPlayer();
+    const host = ui.box.parentElement;
+    if (!player || !host) return;
+    const pr = player.getBoundingClientRect();
+    if (!pr.width) return;
+    if (!shortsAnchor) {
+      host.style.left = shortsGap + 'px';
+      host.style.top = shortsGap + 'px';
+      return;
+    }
+    const cur = {
+      left: parseFloat(host.style.left) || 0,
+      top: parseFloat(host.style.top) || 0,
+    };
+    const btn = ui.muteBtn.getBoundingClientRect();
+    const wantX = pr.left + shortsAnchor.fx * pr.width;
+    const wantY = pr.top + shortsAnchor.fy * pr.height;
+    host.style.left = Math.round(cur.left + wantX - (btn.left + btn.width / 2)) + 'px';
+    host.style.top = Math.round(cur.top + wantY - (btn.top + btn.height / 2)) + 'px';
+
+    // не даём блоку вылезти за пределы плеера
+    const box = ui.box.getBoundingClientRect();
+    let dx = 0;
+    let dy = 0;
+    if (box.right > pr.right - shortsGap) dx = pr.right - shortsGap - box.right;
+    if (box.left + dx < pr.left + shortsGap) dx = pr.left + shortsGap - box.left;
+    if (box.bottom > pr.bottom - shortsGap) dy = pr.bottom - shortsGap - box.bottom;
+    if (box.top + dy < pr.top + shortsGap) dy = pr.top + shortsGap - box.top;
+    if (dx || dy) {
+      host.style.left = Math.round((parseFloat(host.style.left) || 0) + dx) + 'px';
+      host.style.top = Math.round((parseFloat(host.style.top) || 0) + dy) + 'px';
+    }
   }
 
   // Полный демонтаж: штатная громкость возвращается на место

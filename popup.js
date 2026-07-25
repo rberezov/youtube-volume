@@ -25,6 +25,11 @@ function render() {
   $gammaValue.textContent = Number($gamma.value).toFixed(1);
   $scaleValue.textContent = $scale.value;
   $shortsValue.textContent = $shorts.value;
+  // со штатной шкалой настройки нашей не нужны — остаются только кривая
+  // и её включение
+  for (const row of document.querySelectorAll('.own-only')) {
+    row.hidden = $useNative.checked;
+  }
 }
 
 // Запись откладывается: chrome.storage.sync допускает ~2 записи в

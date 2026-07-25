@@ -43,13 +43,13 @@
     <div class="hint">Громкость на выходе = позиция^γ. 1 — линейно, 3 — рекомендуется, больше — точнее внизу шкалы.</div>
   </div>
 
-  <div class="row">
+  <div class="row own-only">
     <label>Длина ползунка: <span class="value" id="scaleValue"></span>% ширины плеера</label>
     <input type="range" id="sliderScale" min="2" max="70" step="1">
     <div class="hint">Масштабируется вместе с плеером и сжимается, если в панели не хватает места. Шаг ползунка — 0.1%. Колесо мыши: ±1%, с Shift: ±0.1%.</div>
   </div>
 
-  <div class="row">
+  <div class="row own-only">
     <label>Длина в Shorts: <span class="value" id="shortsValue"></span>% ширины плеера</label>
     <input type="range" id="shortsScale" min="2" max="70" step="1">
     <div class="hint">Отдельный размер: плеер Shorts узкий, и доля от его ширины нужна своя.</div>
@@ -63,7 +63,7 @@
     <div class="hint">Своя шкала не строится, регулировка — обычная, но экспоненциальная кривая продолжает работать.</div>
   </div>
 
-  <div class="row">
+  <div class="row own-only">
     <label>
       <input type="checkbox" id="showPercent">
       Показывать проценты
@@ -71,7 +71,7 @@
     <div class="hint">Без подписи рамка компактнее; точное значение остаётся в подсказке при наведении.</div>
   </div>
 
-  <div class="row">
+  <div class="row own-only">
     <label>
       <input type="checkbox" id="autoCollapse">
       Сворачивать шкалу без курсора
