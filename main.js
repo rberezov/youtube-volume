@@ -45,20 +45,63 @@
         return;
       }
       logicalVolume.set(this, v);
-      const real = toReal(v);
-      // не трогаем аудиотракт, если фактическое значение не меняется:
-      // повторные записи того же уровня не должны давать даже шанса на щелчки
-      if (Math.abs(nativeDesc.get.call(this) - real) > 1e-6) {
-        nativeDesc.set.call(this, real);
-      }
+      setRealSmooth(this, toReal(v));
     },
   });
 
-  // Применить кривую заново (после смены настроек)
+  // Плавная подводка фактической громкости. Мгновенный скачок уровня —
+  // это разрыв формы волны, который слышен как щелчок/треск; с кривой
+  // шаги наверху шкалы ещё и втрое крупнее. Поэтому любое изменение
+  // реального значения растягивается на ~100мс мелкими шагами
+  // (экспоненциальное приближение к цели). Новая цель во время подводки
+  // просто подменяет старую — перетаскивание превращается в одно
+  // непрерывное скольжение уровня без ступенек.
+  const ramps = new WeakMap();
+  function setRealSmooth(el, target) {
+    let st = ramps.get(el);
+    if (!st) {
+      st = { active: false, target: 0 };
+      ramps.set(el, st);
+    }
+    st.target = target;
+    if (st.active) return; // текущий цикл дотянет до новой цели
+    const current = nativeDesc.get.call(el);
+    if (Math.abs(current - target) < 1e-6) return;
+    if (document.hidden) {
+      // в фоновой вкладке таймеры заторможены — ставим сразу
+      nativeDesc.set.call(el, target);
+      return;
+    }
+    st.active = true;
+    let value = current;
+    let last = performance.now();
+    const step = () => {
+      if (document.hidden) {
+        nativeDesc.set.call(el, st.target);
+        st.active = false;
+        return;
+      }
+      const now = performance.now();
+      const k = 1 - Math.exp(-(now - last) / 40); // постоянная времени 40мс
+      last = now;
+      value += (st.target - value) * Math.max(k, 0.2);
+      if (Math.abs(st.target - value) < 0.002) {
+        nativeDesc.set.call(el, st.target);
+        st.active = false;
+        return;
+      }
+      nativeDesc.set.call(el, Math.min(1, Math.max(0, value)));
+      setTimeout(step, 16);
+    };
+    step();
+  }
+
+  // Применить кривую заново (после смены настроек); плавная подводка сама
+  // пропускает элементы, у которых фактическое значение не меняется
   function reapplyCurve() {
     document.querySelectorAll('video, audio').forEach((el) => {
       if (logicalVolume.has(el)) {
-        nativeDesc.set.call(el, toReal(logicalVolume.get(el)));
+        setRealSmooth(el, toReal(logicalVolume.get(el)));
       }
     });
   }
@@ -743,8 +786,14 @@
     }, 250);
   }
 
-  // YouTube — SPA: плеер может появляться/пересоздаваться при навигации
-  setInterval(ensureUI, 1000);
+  // YouTube — SPA: плеер может появляться/пересоздаваться при навигации.
+  // Заодно раз в секунду переспрашиваем настройки у bridge — доставка
+  // становится самовосстанавливающейся, даже если разовое сообщение
+  // потерялось (bridge отвечает текущим содержимым chrome.storage)
+  setInterval(() => {
+    ensureUI();
+    window.postMessage({ type: 'YTEV_GET_SETTINGS' }, '*');
+  }, 1000);
   document.addEventListener('yt-navigate-finish', () => setTimeout(ensureUI, 0));
   document.addEventListener('DOMContentLoaded', ensureUI);
   document.addEventListener('fullscreenchange', () => setTimeout(layout, 0));

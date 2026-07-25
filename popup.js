@@ -21,14 +21,25 @@ function render() {
   $scaleValue.textContent = $scale.value;
 }
 
+// Запись откладывается: chrome.storage.sync допускает ~2 записи в
+// секунду, а перетаскивание ползунка даёт десятки событий input — лишние
+// записи молча отбрасывались квотой, включая финальное значение, и
+// настройка «не менялась»
+let saveTimer = 0;
 function save() {
-  chrome.storage.sync.set({
-    enabled: $enabled.checked,
-    gamma: Number($gamma.value),
-    sliderScale: Number($scale.value),
-    showPercent: $showPercent.checked,
-    autoCollapse: $autoCollapse.checked,
-  });
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    chrome.storage.sync.set(
+      {
+        enabled: $enabled.checked,
+        gamma: Number($gamma.value),
+        sliderScale: Number($scale.value),
+        showPercent: $showPercent.checked,
+        autoCollapse: $autoCollapse.checked,
+      },
+      () => void chrome.runtime.lastError
+    );
+  }, 250);
 }
 
 chrome.storage.sync.get(DEFAULTS, (s) => {
