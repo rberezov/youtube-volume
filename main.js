@@ -106,12 +106,28 @@
     }
     /* содержимое поверх слоя подсветки */
     .ytev-box > * { position: relative; z-index: 1; }
-    /* кнопка mute — большая «зона нажатия» выше видимой плашки; внутри
-       рамки ужимаем её до высоты рамки, иконка (размеры в %) следует сама */
-    .ytev-box .ytp-mute-button {
-      height: 100% !important;
+    /* геометрия рамки: отступ --ytev-pad одинаков со всех сторон.
+       Кнопка mute (у YouTube это большая «зона нажатия» с внутренними
+       полями под другой размер) ужимается до квадрата высотой
+       «рамка минус два отступа» и принудительно центрируется — иконка
+       в кнопках YouTube задана в процентах и следует за размером */
+    .ytev-box.ytev-framed {
+      padding: 0 var(--ytev-pad, 10px);
+      gap: calc(var(--ytev-pad, 10px) * .8);
+    }
+    .ytev-box:not(.ytev-framed) { gap: 6px; }
+    .ytev-box.ytev-framed .ytp-mute-button {
+      height: calc(100% - 2 * var(--ytev-pad, 10px)) !important;
+      width: auto !important;
+      aspect-ratio: 1 / 1 !important;
       min-height: 0 !important;
+      padding: 0 !important;
+      margin: 0 !important;
+      display: inline-flex !important;
+      align-items: center !important;
+      justify-content: center !important;
       box-sizing: border-box !important;
+      overflow: visible;
     }
     /* подсветка при наведении — скруглённый слой с отступом только по
        бокам, как у штатных элементов YouTube; на раскладку не влияет */
@@ -158,7 +174,6 @@
       font-family: Roboto, Arial, sans-serif;
       font-size: var(--ytev-font);
       line-height: 1;
-      margin-left: .55em;
       min-width: 2.5em; /* ровно под «100%», чтобы рамка не гуляла по ширине */
       text-align: left;
       white-space: nowrap;
@@ -293,12 +308,14 @@
   const isTransparentBg = (bg) =>
     !bg || bg === 'transparent' || /rgba\([^)]*,\s*0\s*\)$/.test(bg);
 
-  // Элемент, который реально рисует фон «плашки»: у обёрток (например,
+  // Элементы, которые реально рисуют фон «плашки»: у обёрток (например,
   // .ytp-time-display) фон часто прозрачный, а видимая плашка — на
-  // вложенном элементе. Обходим поддерево и берём первый элемент с
-  // непрозрачным фоном правдоподобной для плашки высоты.
-  function findSurface(root) {
-    if (!root || !root.isConnected) return null;
+  // вложенном элементе; бывает и наоборот — полупрозрачный фон висит на
+  // высокой обёртке. Поэтому собираем ВСЕ элементы с непрозрачным фоном
+  // правдоподобной высоты, а образцом берём самый низкий: настоящая
+  // плашка — самый компактный фоновый элемент строки.
+  function collectSurfaces(root, out) {
+    if (!root || !root.isConnected) return;
     const queue = [root];
     while (queue.length) {
       const el = queue.shift();
@@ -307,12 +324,11 @@
       if (s.display === 'none') continue;
       if (!isTransparentBg(s.backgroundColor)) {
         const h = el.getBoundingClientRect().height;
-        if (h >= 24 && h <= 80) return { el, style: s };
-        continue; // фоновые мелочи (переключатели) и растянутые обёртки
+        // мелочь (переключатели, бейджи) и растянутые панели отсеиваем
+        if (h >= 24 && h <= 80) out.push({ el, style: s, h });
       }
       for (const c of el.children) queue.push(c);
     }
-    return null;
   }
 
   // Свою рамку рисуем сами, копируя оформление с реально видимой плашки
@@ -324,15 +340,13 @@
   // фоновых плашек нет — блок остаётся прозрачным.
   function syncFrameStyle() {
     const player = getPlayer();
+    const surfaces = [];
+    collectSurfaces(player && player.querySelector('.ytp-time-display'), surfaces);
+    collectSurfaces(player && player.querySelector('.ytp-right-controls'), surfaces);
+    collectSurfaces(findPill(), surfaces);
     let surface = null;
-    const candidates = [
-      player && player.querySelector('.ytp-time-display'),
-      player && player.querySelector('.ytp-right-controls'),
-      findPill(),
-    ];
-    for (const cand of candidates) {
-      surface = findSurface(cand);
-      if (surface) break;
+    for (const sf of surfaces) {
+      if (!surface || sf.h < surface.h) surface = sf;
     }
     if (resizeObserver && surface && surface.el !== observedPill) {
       resizeObserver.observe(surface.el); // плашка меняет высоту в big-mode
@@ -344,22 +358,22 @@
       st.background = '';
       st.borderRadius = '';
       st.height = '';
-      st.padding = '';
       st.backdropFilter = '';
+      st.removeProperty('--ytev-pad');
       st.removeProperty('--ytev-hl-inset');
       return;
     }
     const s = surface.style;
-    const h = Math.round(surface.el.getBoundingClientRect().height);
+    const h = Math.round(surface.h);
     st.background = s.backgroundColor;
     st.borderRadius = s.borderRadius;
     st.height = h + 'px';
-    // отступы рамки — только по бокам, пропорциональны высоте; слева
-    // кнопка mute несёт собственные поля, поэтому отступ меньше
-    const padR = Math.round(h * 0.3);
-    const padL = ui.mute && ui.box.contains(ui.mute) ? Math.round(padR * 0.4) : padR;
-    st.padding = '0 ' + padR + 'px 0 ' + padL + 'px';
-    st.setProperty('--ytev-hl-inset', Math.max(3, Math.round(h * 0.09)) + 'px');
+    // единый отступ со всех сторон: сверху/снизу его задаёт центровка
+    // содержимого (кнопка ужата до «высота минус два отступа»), слева и
+    // справа — боковые поля рамки той же величины
+    const pad = Math.max(6, Math.round(h * 0.23));
+    st.setProperty('--ytev-pad', pad + 'px');
+    st.setProperty('--ytev-hl-inset', Math.max(3, Math.round(pad * 0.45)) + 'px');
     st.backdropFilter = s.backdropFilter && s.backdropFilter !== 'none' ? s.backdropFilter : '';
   }
 
