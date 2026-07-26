@@ -15,7 +15,36 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     return false;
   }
   const INSTANCE_KEY = Symbol.for('ytev.main.instance.v2');
-  if (window[INSTANCE_KEY]) return false;
+  // Смена поколений. Ключ глобального реестра символов угадывается тривиально,
+  // поэтому «занят — значит уходим» означало бы, что страница выключает
+  // расширение одной строкой. Опознаём именно свой экземпляр и различаем два
+  // случая: тот же документ (bridge жив, канал совпадает — второй раз
+  // разворачиваться не нужно) и старое поколение после перезагрузки
+  // расширения (канал другой: секрет и канал прошлого bridge уже мертвы, и
+  // без передачи управления настройки из popup до страницы не доходили).
+  // Гасим предшественника ДО захвата дескрипторов ниже: его dispose()
+  // возвращает нативные volume/muted, и порядок наоборот стёр бы наш патч.
+  const previous = window[INSTANCE_KEY];
+  const isOurs =
+    previous &&
+    typeof previous === 'object' &&
+    previous.version === 2 &&
+    typeof previous.dispose === 'function' &&
+    typeof previous.channel === 'string';
+  if (isOurs && previous.channel === CHANNEL_ID) return false;
+  if (isOurs) {
+    try {
+      previous.dispose();
+    } catch {}
+  }
+
+  // Снятие всего, что экземпляр развесил на window/document. Нужно для
+  // dispose(): без этого старое поколение продолжало бы жить слушателями.
+  const teardown = [];
+  function on(target, type, handler, options) {
+    target.addEventListener(type, handler, options);
+    teardown.push(() => target.removeEventListener(type, handler, options));
+  }
 
   const SETTINGS = {
     enabled: true,          // применять экспоненциальную кривую
@@ -44,25 +73,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     }
   }
 
-  // Строка управления Shorts перехватывает bubbling/capture-события своих
-  // дочерних контролов. Из-за этого нативный range визуально двигался, но
-  // его собственный input-обработчик мог вообще не вызываться. Ловим input
-  // раньше обвязки YouTube — на window в capture-фазе — и передаём именно
-  // тот ползунок, который породил событие.
-  window.addEventListener(
-    'input',
-    (e) => {
-      const slider = e.target;
-      if (
-        slider instanceof HTMLInputElement &&
-        slider.classList.contains('ytev-slider')
-      ) {
-        applySliderValue(slider);
-      }
-    },
-    true
-  );
-
   /* ------------------------------------------------------------------ *
    * 1. Экспоненциальная кривая громкости
    *
@@ -85,7 +95,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     typeof nativeMutedDesc.get !== 'function' ||
     typeof nativeMutedDesc.set !== 'function'
   ) {
-    return;
+    return false;
   }
   const logicalVolume = new WeakMap();
 
@@ -129,18 +139,30 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     },
     set(value) {
       const requested = !!value;
-      // В кастомном режиме сохранённое состояние — источник истины.
       // Shorts при запуске успевает выставить autoplay-mute до события
       // playing; подавляем эту запись прямо в сеттере, без одного кадра
       // с неправильным значком. Кнопка и клавиша M заранее обновляют
       // preferredMuted, поэтому осознанное действие пользователя проходит.
-      const target =
+      //
+      // Окно узкое намеренно. Раньше сеттер держал preferredMuted вечно и
+      // для любого направления: тогда video.muted = true не срабатывал
+      // никогда, включая честный muted-autoplay, а без него браузер
+      // отклоняет play() и ролик не стартует сам. Поэтому подавляем только
+      // включение mute, только пока пользователь осознанно держит звук,
+      // только первые секунды жизни элемента и только если у документа уже
+      // есть пользовательская активация — без неё незаглушённое
+      // воспроизведение невозможно в принципе и мешать браузеру нельзя.
+      // Обратное направление (снятие mute при preferredMuted === true)
+      // сеттер не трогает: его доводит onVolumeChange через
+      // restorePreferredState, на кадр позже, но без риска для автозапуска.
+      const suppress =
+        requested &&
         !SETTINGS.useNativeSlider &&
-        this === getVideo() &&
-        typeof preferredMuted === 'boolean'
-          ? preferredMuted
-          : requested;
-      nativeMutedDesc.set.call(this, target);
+        preferredMuted === false &&
+        Date.now() < mutedGuardUntil &&
+        hasUserActivation() &&
+        this === getVideo();
+      nativeMutedDesc.set.call(this, suppress ? false : requested);
     },
   });
 
@@ -164,9 +186,24 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   let preferredMutedDirty = false;
   let saveVolumeTimer = 0;
   let saveMutedTimer = 0;
+  // Последний ненулевой уровень: кнопка «включить звук» на нуле возвращает
+  // именно его — как штатная кнопка YouTube. Без этого клик снимал mute,
+  // оставлял нулевую громкость и выглядел как мёртвая кнопка.
+  let lastAudibleVolume = 0.5;
+  // Окно подавления autoplay-mute, переоткрывается на каждый новый <video>
+  const MUTED_GUARD_MS = 3000;
+  let mutedGuardUntil = 0;
+  const hasUserActivation = () =>
+    typeof navigator === 'object' &&
+    !!navigator &&
+    !!navigator.userActivation &&
+    navigator.userActivation.hasBeenActive === true;
   const STATE_CACHE_KEY = 'ytev-volume-state-v1';
   const validVolume = (value) =>
     Number.isFinite(value) && value >= 0 && value <= 1;
+  const rememberAudible = (volume) => {
+    if (validVolume(volume) && volume > 0) lastAudibleVolume = volume;
+  };
 
   function cachePreferredState() {
     try {
@@ -188,6 +225,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const cachedVolume = Number(cached && cached.volume);
     if (cached && cached.volume != null && validVolume(cachedVolume)) {
       preferredVolume = cachedVolume;
+      rememberAudible(cachedVolume);
     }
     if (cached && typeof cached.muted === 'boolean') {
       preferredMuted = cached.muted;
@@ -198,11 +236,19 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const volume = Number(value);
     if (!validVolume(volume)) return;
     preferredVolume = volume;
-    if (!persist) return;
+    if (!persist) {
+      rememberAudible(volume);
+      return;
+    }
     preferredVolumeDirty = true;
     cachePreferredState();
     clearTimeout(saveVolumeTimer);
     saveVolumeTimer = setTimeout(() => {
+      // Уровень «до выключения звука» запоминаем только когда регулировка
+      // остановилась. Иначе протяжка к нулю оставляла бы последним
+      // слышимым значением случайные проценты, пойманные по дороге, и
+      // кнопка возвращала бы почти тишину.
+      rememberAudible(volume);
       window.postMessage(
         { type: 'YTEV_SAVE_VOLUME', channel: CHANNEL_ID, volume },
         PAGE_ORIGIN
@@ -241,10 +287,21 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     target instanceof HTMLSelectElement ||
     (target instanceof HTMLElement && target.isContentEditable);
 
+  // Тот же набор, что и в bridge.js: условия «жест над плеером» должны
+  // совпадать в обоих мирах, иначе один считает действие осознанным, а
+  // второй отказывается его сохранять.
+  const PLAYER_SELECTOR = '#movie_player, .html5-video-player, ytd-reel-video-renderer';
+  const insidePlayer = (target) => {
+    const player = getPlayer();
+    if (player && target instanceof Node && player.contains(target)) return true;
+    return target instanceof Element && !!target.closest(PLAYER_SELECTOR);
+  };
+
   // Внешние способы управления YouTube тоже считаются осознанным выбором:
   // стрелки/колесо и штатная шкала должны обновлять preferredVolume, а не
   // выглядеть как очередной автоматический сброс при смене media.
-  window.addEventListener(
+  on(
+    window,
     'keydown',
     (e) => {
       if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -258,7 +315,13 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         return;
       }
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-        markVolumeIntent();
+        // Только над плеером: YouTube и сам меняет громкость стрелками
+        // лишь при фокусе на плеере, а bridge открывает окно записи по
+        // тому же условию. Раньше main.js метил намерение на любой стрелке
+        // (например, при прокрутке комментариев) — и тогда служебный сброс
+        // громкости принимался за осознанный выбор, а запись всё равно
+        // отклонялась мостом: состояние сессии расходилось с хранилищем.
+        if (insidePlayer(target)) markVolumeIntent();
         return;
       }
       if (String(e.key).toLowerCase() !== 'm' || e.repeat) return;
@@ -269,7 +332,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     true
   );
 
-  window.addEventListener(
+  on(
+    window,
     'wheel',
     (e) => {
       const player = getPlayer();
@@ -280,7 +344,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     true
   );
 
-  window.addEventListener(
+  on(
+    window,
     'pointerdown',
     (e) => {
       const target = e.target instanceof Element ? e.target : null;
@@ -293,7 +358,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     true
   );
 
-  window.addEventListener(
+  on(
+    window,
     'pointermove',
     (e) => {
       if (!(e.buttons & 1)) return;
@@ -360,7 +426,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   };
   const drmElements = new WeakSet();
 
-  document.addEventListener(
+  on(
+    document,
     'encrypted',
     (e) => {
       if (e.target instanceof HTMLMediaElement) drmElements.add(e.target);
@@ -497,7 +564,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     });
   }
   for (const type of ['pointerdown', 'keydown', 'playing']) {
-    document.addEventListener(type, engageAudio, true);
+    on(document, type, engageAudio, true);
   }
 
   // Запасной путь (Web Audio недоступен): подводка таймером — грубее,
@@ -590,6 +657,12 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   const instanceApi = Object.freeze({
     version: 2,
+    // Канал — опознавательный знак поколения, не секрет: он и так виден
+    // странице, потому что main.js сам публикует его в postMessage.
+    // Совпал — значит это тот же bridge и разворачиваться второй раз не
+    // нужно; не совпал — расширение перезагрузили, и мы уступаем место.
+    channel: CHANNEL_ID,
+    dispose: disposeInstance,
     update(candidateSecret, payload) {
       if (candidateSecret !== updateSecret) return false;
       return applyTrustedPayload(payload, false);
@@ -1343,6 +1416,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     if (!video || video === boundVideo) return;
     unbindVideo();
     boundVideo = video;
+    // Новый элемент — новое окно подавления autoplay-mute: в Shorts каждая
+    // лента приходит со своим <video>, и именно на первых кадрах YouTube
+    // успевает выставить mute до того, как мы восстановим состояние.
+    mutedGuardUntil = Date.now() + MUTED_GUARD_MS;
     const current = Number(logicalOf(video));
     if (!validVolume(preferredVolume) && validVolume(current)) {
       rememberVolume(current);
@@ -1539,7 +1616,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
    * небольшими элементами (кнопка, а не контейнер всей панели).
    * ------------------------------------------------------------------ */
 
-  const hiddenNative = new Set();
+  // Узел → его прежний inline-display. Именно Map, а не Set: элемент мог
+  // иметь собственный inline-стиль, и возврат пустой строкой его терял.
+  const hiddenNative = new Map();
   // в новом интерфейсе классы в camelCase (ytdVolumeControlsHost), поэтому
   // без требования не-буквы перед словом — иначе такие имена не находились
   const VOLUME_HINT = /volume|mute/i;
@@ -1607,6 +1686,12 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   function hideNativeVolume() {
     const scope = shortsScope();
     if (!scope) return;
+    // Функция вызывается на каждом тике, а лента Shorts бесконечно
+    // пересоздаёт свои узлы. Без чистки набор удерживал бы отсоединённые
+    // поддеревья всех просмотренных роликов до самого выключения.
+    for (const el of hiddenNative.keys()) {
+      if (!el.isConnected) hiddenNative.delete(el);
+    }
     const player = getPlayer();
     const pr = player ? player.getBoundingClientRect() : null;
     const candidates = [
@@ -1639,16 +1724,16 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     }
 
     for (const el of candidates) {
+      hiddenNative.set(el, el.style.display);
       el.dataset.ytevHidden = '1';
       el.style.display = 'none';
-      hiddenNative.add(el);
     }
   }
 
   function restoreNativeVolume() {
-    for (const el of hiddenNative) {
+    for (const [el, display] of hiddenNative) {
       if (el.isConnected && el.dataset.ytevHidden) {
-        el.style.display = '';
+        el.style.display = display || '';
         delete el.dataset.ytevHidden;
       }
     }
@@ -1779,10 +1864,21 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       const player = getPlayer();
       const video = getVideo();
       if (!video) return;
-      if (video.muted || video.volume === 0) {
+      const silent = video.volume === 0;
+      if (video.muted || silent) {
         rememberMuted(false, true);
         if (player && typeof player.unMute === 'function') player.unMute();
         video.muted = false;
+        // На нулевой громкости снятия mute мало: уровень остаётся нулевым и
+        // кнопка выглядит мёртвой (щёлкаешь — тишина, и обратно не
+        // выключается). Возвращаем последний слышимый уровень, как это
+        // делает штатная кнопка YouTube, через общий путь ползунка — он
+        // сам снимет mute у плеера, сохранит значение и отложенно отдаст
+        // его в настройки YouTube.
+        if (silent && ui) {
+          ui.slider.value = String(lastAudibleVolume * 100);
+          applySliderValue(ui.slider);
+        }
       } else {
         rememberMuted(true, true);
         if (player && typeof player.mute === 'function') player.mute();
@@ -1893,16 +1989,31 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     }, 250);
   }
 
+  // Строка управления Shorts перехватывает bubbling/capture-события своих
+  // дочерних контролов. Из-за этого нативный range визуально двигался, но
+  // его собственный input-обработчик мог вообще не вызываться. Ловим input
+  // раньше обвязки YouTube — на window в capture-фазе.
+  //
+  // Проверки обязательны в обе стороны. Раньше условием было «у элемента
+  // есть класс ytev-slider», и любой скрипт страницы мог создать свой
+  // <input class="ytev-slider">, послать ненастоящий input и крутить
+  // громкость. Берём только настоящее событие и только со своего ползунка.
+  // Регистрация стоит здесь, а не в начале функции: до объявления ui
+  // обработчик обращался бы к переменной в TDZ.
+  on(
+    window,
+    'input',
+    (e) => {
+      if (!e.isTrusted || !ui || e.target !== ui.slider) return;
+      applySliderValue(ui.slider);
+    },
+    true
+  );
+
   applyTrustedPayload(initialPayload, true);
-  Object.defineProperty(window, INSTANCE_KEY, {
-    configurable: false,
-    enumerable: false,
-    writable: false,
-    value: instanceApi,
-  });
 
   // YouTube — SPA: плеер может появляться/пересоздаваться при навигации.
-  setInterval(() => {
+  const tick = setInterval(() => {
     bindVideo();
     ensureUI();
   }, 1000);
@@ -1911,9 +2022,52 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       bindVideo();
       ensureUI();
     }, 0);
-  document.addEventListener('yt-navigate-finish', refreshAfterNavigation);
-  document.addEventListener('DOMContentLoaded', refreshAfterNavigation);
-  document.addEventListener('fullscreenchange', () => setTimeout(layout, 0));
-  window.addEventListener('resize', layout);
+  on(document, 'yt-navigate-finish', refreshAfterNavigation);
+  on(document, 'DOMContentLoaded', refreshAfterNavigation);
+  on(document, 'fullscreenchange', () => setTimeout(layout, 0));
+  on(window, 'resize', layout);
+
+  // Регистрация перезаписываемая: иначе следующее поколение (перезагрузка
+  // расширения) не смогло бы встать на место мёртвого экземпляра, а
+  // страница, заранее занявшая ключ, выключала бы расширение навсегда.
+  // Провал defineProperty (ключ занят неперезаписываемым чужим значением)
+  // не фатален: без регистрации теряется только живое обновление настроек.
+  try {
+    Object.defineProperty(window, INSTANCE_KEY, {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: instanceApi,
+    });
+  } catch {}
   return true;
+
+  // Полная остановка экземпляра. Вызывается только следующим поколением и
+  // только до того, как оно захватит дескрипторы: сначала мы возвращаем
+  // нативные volume/muted, потом преемник берёт их уже чистыми.
+  function disposeInstance() {
+    clearInterval(tick);
+    clearTimeout(saveVolumeTimer);
+    clearTimeout(saveMutedTimer);
+    clearTimeout(persistTimer);
+    for (const off of teardown.splice(0)) {
+      try {
+        off();
+      } catch {}
+    }
+    try {
+      teardownUI();
+      unbindVideo();
+    } catch {}
+    // Граф Web Audio необратим: элемент навсегда привязан к первому
+    // MediaElementAudioSourceNode, и преемник уже не сможет его создать.
+    // Поэтому не бросаем элементы с чужим усилением — переводим их на
+    // прямую запись громкости тем же путём, что и сторож тишины.
+    for (const el of document.querySelectorAll('video, audio')) {
+      const node = audio.nodes.get(el);
+      if (node) fallbackToDirect(el, node);
+    }
+    Object.defineProperty(mediaProto, 'volume', nativeDesc);
+    Object.defineProperty(mediaProto, 'muted', nativeMutedDesc);
+  }
 }

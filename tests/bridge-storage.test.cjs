@@ -12,11 +12,32 @@ let localVolume = 0.37;
 let localMuted = false;
 let now = 1000;
 let onStorageChanged;
-const activeVideo = { muted: false, volume: 0.55 };
+const activeVideo = {
+  muted: false,
+  volume: 0.55,
+  addEventListener() {},
+  removeEventListener() {},
+};
+
+// Что изолированный мир видит в DOM: собственный ползунок расширения и/или
+// штатная панель YouTube с процентами. Именно отсюда bridge берёт значение,
+// которым подтверждает запись после стрелок, колеса и штатных контролов.
+const page = { sliders: [], ariaVolume: 42 };
+const volumePanel = {
+  getAttribute(name) {
+    return name === 'aria-valuenow' ? String(page.ariaVolume) : null;
+  },
+};
 
 const documentMock = {
   querySelector(selector) {
+    if (selector.includes('ytp-volume-panel')) {
+      return page.ariaVolume == null ? null : volumePanel;
+    }
     return selector.includes('video') ? activeVideo : null;
+  },
+  querySelectorAll(selector) {
+    return selector === '.ytev-slider' ? page.sliders : [];
   },
 };
 
@@ -291,6 +312,83 @@ onMessage({
   data: { type: 'YTEV_SAVE_MUTED', channel, muted: 'yes' },
 });
 assert.equal(saved.length, 6);
+
+// Окно доверия открыто настоящей стрелкой, но записать в него можно только
+// то значение, которое подтверждает видимый пользователю контрол. Раньше
+// стрелки открывали окно вообще без ожидаемого значения, и страница —
+// канал ей виден — успевала записать произвольное, заодно съедая бюджет.
+const arrowOverPlayer = {
+  isTrusted: true,
+  defaultPrevented: false,
+  ctrlKey: false,
+  metaKey: false,
+  altKey: false,
+  repeat: false,
+  key: 'ArrowUp',
+  target: {
+    tagName: 'DIV',
+    closest(selector) {
+      return selector.includes('#movie_player') ? this : null;
+    },
+  },
+};
+
+now += 300;
+page.ariaVolume = 60;
+onKeyDown(arrowOverPlayer);
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 0.007 },
+});
+assert.equal(saved.length, 6, 'a value the page invented must not be written');
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 0.6 },
+});
+assert.equal(saved.length, 7, 'the value shown by the native panel must be written');
+assert.equal(saved[6].savedVolume, 0.6);
+
+// Нечего подтвердить — нечего и писать: уровень применится к сессии, но в
+// хранилище не попадёт.
+now += 300;
+page.ariaVolume = null;
+onKeyDown(arrowOverPlayer);
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 0.6 },
+});
+assert.equal(saved.length, 7, 'without a corroborating control nothing is written');
+
+// Свой ползунок ровно один. Второй с тем же классом означает подделку на
+// странице, и доверять положению «ползунка» больше нельзя.
+now += 300;
+page.ariaVolume = 60;
+const decoy = { tagName: 'INPUT', value: '100', closest: () => null };
+page.sliders = [ownSlider, decoy];
+onKeyDown(arrowOverPlayer);
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 1 },
+});
+assert.equal(saved.length, 7, 'a decoy slider must disable DOM corroboration');
+
+// Один настоящий ползунок — источник снова есть, и подтверждается ровно
+// его положение.
+now += 300;
+page.sliders = [ownSlider];
+onKeyDown(arrowOverPlayer);
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 0.55 },
+});
+assert.equal(saved.length, 8, 'the extension slider position must be written');
+assert.equal(saved[7].savedVolume, 0.55);
+page.sliders = [];
 
 onStorageChanged({ gamma: { newValue: 2.5 } }, 'sync');
 assert.equal(runtimeMessages.length, 2);

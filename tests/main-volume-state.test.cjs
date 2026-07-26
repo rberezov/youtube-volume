@@ -38,6 +38,10 @@ class HTMLMediaElementMock extends HTMLElementMock {
     super();
     this._volume = volume;
     this._muted = muted;
+    // Что реально дошло до нативного сеттера. Проверять итоговое значение
+    // мало: сверка в onVolumeChange всё равно доводит состояние до
+    // preferredMuted, и подавленная запись выглядела бы как пропущенная.
+    this.mutedWrites = [];
     this.listeners = new Map();
     this.paused = true;
     this.currentTime = 0;
@@ -85,6 +89,7 @@ Object.defineProperty(HTMLMediaElementMock.prototype, 'muted', {
   },
   set(value) {
     this._muted = !!value;
+    this.mutedWrites.push(this._muted);
     this.dispatchEvent(new EventMock('volumechange'));
   },
 });
@@ -183,6 +188,7 @@ const context = vm.createContext({
     },
   },
   location: { origin: 'https://www.youtube.com', pathname: '/watch' },
+  navigator: { userActivation: { hasBeenActive: false } },
   performance: { now: () => clock },
   requestAnimationFrame(callback) {
     callback();
@@ -268,6 +274,110 @@ assert.equal(
 assert.ok(
   posted.some((message) => message.type === 'YTEV_SAVE_VOLUME' && message.volume === 0.6),
   'accepted user volume should be persisted'
+);
+
+// --- подавление autoplay-mute: узкое окно вместо «навсегда» ---
+// Раньше сеттер держал preferredMuted бессрочно, и video.muted = true не
+// срабатывал никогда. Для muted-autoplay это фатально: без активации
+// документа браузер отклоняет play() у незаглушённого элемента.
+assert.equal(
+  instance.update(secret, { settings: { useNativeSlider: false } }),
+  true,
+  'switching to the extension slider must be accepted'
+);
+currentVideo = videoA;
+intervals[0]();
+
+videoA.mutedWrites.length = 0;
+context.navigator.userActivation.hasBeenActive = false;
+videoA.muted = true;
+assert.equal(
+  videoA.mutedWrites[0],
+  true,
+  'without user activation muted autoplay must reach the element'
+);
+
+videoA.muted = false;
+clock = 6000; // всё ещё внутри окна, открытого привязкой videoA
+videoA.mutedWrites.length = 0;
+context.navigator.userActivation.hasBeenActive = true;
+videoA.muted = true;
+assert.equal(
+  videoA.mutedWrites[0],
+  false,
+  "YouTube's autoplay mute must be suppressed inside the guard window"
+);
+
+clock = 20000;
+videoA.mutedWrites.length = 0;
+videoA.muted = true;
+assert.equal(
+  videoA.mutedWrites[0],
+  true,
+  'after the guard window expires muted writes must pass through'
+);
+
+// --- смена поколений ---
+// Тот же bridge (тот же канал) не должен разворачивать второй экземпляр,
+// а перезагрузка расширения (новый канал и секрет) обязана его сменить:
+// раньше старый экземпляр оставался навсегда, и настройки из popup не
+// доходили до страницы до перезагрузки вкладки.
+assert.equal(
+  context.youtubeVolumeMain(
+    { channel, settings: {}, state: { savedVolume: 0.4, savedMuted: false } },
+    secret
+  ),
+  false,
+  'the same bridge must not install a second instance'
+);
+assert.equal(
+  windowMock[Symbol.for('ytev.main.instance.v2')],
+  instance,
+  'the registry must still hold the first instance'
+);
+
+const nextChannel = 'fedcba9876543210fedcba9876543210';
+const nextSecret = 'fedcba9876543210'.repeat(4);
+assert.equal(
+  context.youtubeVolumeMain(
+    {
+      channel: nextChannel,
+      settings: { useNativeSlider: true },
+      state: { savedVolume: 0.4, savedMuted: false },
+    },
+    nextSecret
+  ),
+  true,
+  'a reloaded extension must take over the page'
+);
+const nextInstance = windowMock[Symbol.for('ytev.main.instance.v2')];
+assert.notEqual(nextInstance, instance, 'the registry must hold the new generation');
+assert.equal(nextInstance.channel, nextChannel);
+assert.equal(
+  nextInstance.update(secret, { settings: { gamma: 2 } }),
+  false,
+  'the dead secret of the previous generation must be rejected'
+);
+assert.equal(
+  nextInstance.update(nextSecret, { settings: { gamma: 2 } }),
+  true,
+  'the new secret must deliver settings'
+);
+
+// Страница может заранее занять ключ глобального реестра символов — это
+// не повод выключаться: раньше такой захват молча отключал расширение.
+windowMock[Symbol.for('ytev.main.instance.v2')] = { squatted: true };
+assert.equal(
+  context.youtubeVolumeMain(
+    {
+      channel: '00112233445566778899aabbccddeeff',
+      settings: { useNativeSlider: true },
+      state: { savedVolume: 0.4, savedMuted: false },
+    },
+    '0011223344556677'.repeat(4)
+  ),
+  true,
+  'a squatted registry key must not disable the extension'
 );
 
 console.log('main volume state regression test passed');

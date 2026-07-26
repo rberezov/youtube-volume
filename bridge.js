@@ -10,6 +10,10 @@
     Array.from(crypto.getRandomValues(new Uint8Array(byteLength)), (value) =>
       value.toString(16).padStart(2, '0')
     ).join('');
+  // Тот же набор, что и в main.js: условия «жест над плеером» должны
+  // совпадать в обоих мирах, иначе один считает действие осознанным, а
+  // второй отказывается его сохранять.
+  const PLAYER_SELECTOR = '#movie_player, .html5-video-player, ytd-reel-video-renderer';
   const activeChannel = randomHex(16);
   const updateSecret = randomHex(32);
   let volumeIntentUntil = 0;
@@ -17,15 +21,23 @@
   let volumeIntentBudget = 0;
   let mutedIntentBudget = 0;
   let expectedVolume;
+  let expectedVolumeTolerance = 0;
   let expectedMuted;
   let pendingWrite = {};
   let writeTimer = 0;
   let lastWriteAt = 0;
 
-  function grantVolumeIntent(duration = INTENT_WINDOW_MS, expected) {
+  // Ползунок расширения даёт то же самое число, что уйдёт в сообщении, а
+  // штатная панель YouTube показывает целые проценты — оттуда значение
+  // приходит огрублённым, и точное сравнение отвергало бы честные записи.
+  const EXACT_TOLERANCE = 1e-6;
+  const ARIA_TOLERANCE = 0.015;
+
+  function grantVolumeIntent(duration = INTENT_WINDOW_MS, expected, tolerance = EXACT_TOLERANCE) {
     volumeIntentUntil = Date.now() + duration;
     volumeIntentBudget = 1;
     expectedVolume = expected;
+    expectedVolumeTolerance = tolerance;
   }
 
   function grantMutedIntent(duration = INTENT_WINDOW_MS, expected) {
@@ -46,14 +58,16 @@
     grantMutedIntent(duration, expectedMutedValue);
   }
 
+  // Ожидаемое значение обязательно. Раньше при expectedVolume === undefined
+  // окно пропускало любое число: страница видит канал (main.js сам
+  // публикует его в postMessage) и внутри честного окна — например, пока
+  // пользователь жмёт стрелку над плеером — успевала записать своё
+  // значение, заодно съедая единственный бюджет и вытесняя настоящую
+  // запись. Нет подтверждённого значения — нет и записи.
   function consumeVolumeIntent(value) {
     if (Date.now() > volumeIntentUntil || volumeIntentBudget < 1) return false;
-    if (
-      expectedVolume !== undefined &&
-      Math.abs(value - expectedVolume) > 1e-6
-    ) {
-      return false;
-    }
+    if (expectedVolume === undefined) return false;
+    if (Math.abs(value - expectedVolume) > expectedVolumeTolerance) return false;
     volumeIntentBudget -= 1;
     expectedVolume = undefined;
     return true;
@@ -101,6 +115,57 @@
     return document.querySelector('video');
   }
 
+  // Логический уровень глазами изолированного мира. Прочитать video.volume
+  // здесь нельзя: подменённый геттер живёт в MAIN-мире, а сам элемент при
+  // включённом Web Audio держится на максимуме — уровень задаёт усилитель.
+  // Зато видно то же, что и пользователю: положение нашего ползунка либо
+  // проценты на штатной панели YouTube.
+  function logicalPercentFromDom() {
+    if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') {
+      return null;
+    }
+    const sliders = document.querySelectorAll('.ytev-slider');
+    // Больше одного — на странице подделка: свой ползунок ровно один.
+    // Тогда честного источника нет и записи не будет.
+    if (sliders.length > 1) return null;
+    if (sliders.length === 1) {
+      const slider = sliders[0];
+      const pct = Number(slider.value);
+      if (closest(slider, '.ytev-box') && Number.isFinite(pct) && pct >= 0 && pct <= 100) {
+        return { pct, tolerance: EXACT_TOLERANCE };
+      }
+      return null;
+    }
+    const panel = document.querySelector('.ytp-volume-panel[aria-valuenow]');
+    if (panel) {
+      const pct = Number(panel.getAttribute('aria-valuenow'));
+      if (Number.isFinite(pct) && pct >= 0 && pct <= 100) {
+        return { pct, tolerance: ARIA_TOLERANCE };
+      }
+    }
+    return null;
+  }
+
+  // Для стрелок, колеса и штатной панели предсказать результат жеста
+  // заранее нельзя: шаг задаёт YouTube. Поэтому берём пробу уже после
+  // того, как громкость применилась, — на volumechange (он приходит и в
+  // изолированный мир) плюс страховочная проба по таймеру. main.js шлёт
+  // своё сообщение через 250мс дебаунса, то есть заведомо позже.
+  function grantVolumeFromDom(duration = INTENT_WINDOW_MS) {
+    const sample = () => {
+      const observed = logicalPercentFromDom();
+      if (!observed) return;
+      grantVolumeIntent(duration, observed.pct / 100, observed.tolerance);
+    };
+    const video = activeVideo();
+    if (video && typeof video.addEventListener === 'function') {
+      const onChange = () => setTimeout(sample, 0);
+      video.addEventListener('volumechange', onChange);
+      setTimeout(() => video.removeEventListener('volumechange', onChange), 400);
+    }
+    setTimeout(sample, 120);
+  }
+
   function expectedMuteAfterToggle(target) {
     const video = activeVideo();
     if (!video) return undefined;
@@ -135,7 +200,8 @@
         muteControl &&
         (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar')
       ) {
-        grantMutedIntent(5000, expectedMuteAfterToggle(e.target));
+        grantMutedIntent(INTENT_WINDOW_MS, expectedMuteAfterToggle(e.target));
+        grantVolumeFromDom(); // на нулевом уровне кнопка ещё и вернёт громкость
       }
       if (isEditable(e.target)) {
         // Для range браузер сам отправит trusted input уже с новым значением.
@@ -143,8 +209,8 @@
         return;
       }
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-        if (closest(e.target, '#movie_player, .html5-video-player')) {
-          grantVolumeIntent();
+        if (closest(e.target, PLAYER_SELECTOR)) {
+          grantVolumeFromDom();
         }
       } else if (!e.repeat && String(e.key).toLowerCase() === 'm') {
         const video = activeVideo();
@@ -185,8 +251,8 @@
             next > 0 ? false : video ? !!video.muted : undefined
           );
         }
-      } else if (closest(e.target, '#movie_player, .html5-video-player')) {
-        grantVolumeIntent();
+      } else if (closest(e.target, PLAYER_SELECTOR)) {
+        grantVolumeFromDom();
       }
     },
     true
@@ -197,13 +263,14 @@
     (e) => {
       if (!e.isTrusted) return;
       if (closest(e.target, '.ytp-mute-button, .ytev-mute')) {
-        grantMutedIntent(5000, expectedMuteAfterToggle(e.target));
+        grantMutedIntent(INTENT_WINDOW_MS, expectedMuteAfterToggle(e.target));
+        grantVolumeFromDom(); // на нулевом уровне кнопка ещё и вернёт громкость
       }
       if (
         !closest(e.target, '.ytev-slider') &&
         closest(e.target, '.ytp-volume-area, .ytp-volume-panel')
       ) {
-        grantVolumeIntent(5000);
+        grantVolumeFromDom();
       }
     },
     true
@@ -216,7 +283,8 @@
     'click',
     (e) => {
       if (e.isTrusted && closest(e.target, '.ytp-mute-button, .ytev-mute')) {
-        grantMutedIntent(5000, expectedMuteAfterToggle(e.target));
+        grantMutedIntent(INTENT_WINDOW_MS, expectedMuteAfterToggle(e.target));
+        grantVolumeFromDom(); // на нулевом уровне кнопка ещё и вернёт громкость
       }
     },
     true
@@ -230,7 +298,7 @@
         !closest(e.target, '.ytev-slider') &&
         closest(e.target, '.ytp-volume-area, .ytp-volume-panel')
       ) {
-        grantVolumeIntent();
+        grantVolumeFromDom();
       }
     },
     true
