@@ -120,6 +120,14 @@ function addListener(map, type, listener) {
   map.set(type, values);
 }
 
+function removeListener(map, type, listener) {
+  const values = map.get(type) || [];
+  map.set(
+    type,
+    values.filter((value) => value !== listener)
+  );
+}
+
 const windowMock = {
   crypto: {
     getRandomValues(values) {
@@ -131,6 +139,9 @@ const windowMock = {
   },
   addEventListener(type, listener) {
     addListener(windowListeners, type, listener);
+  },
+  removeEventListener(type, listener) {
+    removeListener(windowListeners, type, listener);
   },
   postMessage(message, targetOrigin) {
     posted.push({ ...message, targetOrigin });
@@ -144,6 +155,9 @@ const documentMock = {
   },
   addEventListener(type, listener) {
     addListener(documentListeners, type, listener);
+  },
+  removeEventListener(type, listener) {
+    removeListener(documentListeners, type, listener);
   },
   createElement() {
     return { textContent: '' };
@@ -162,6 +176,70 @@ class ResizeObserverMock {
   disconnect() {}
 }
 
+const mediaSources = new WeakMap();
+class AudioNodeMock {
+  constructor() {
+    this.connections = new Set();
+  }
+  connect(target) {
+    this.connections.add(target);
+    return target;
+  }
+  disconnect(target) {
+    if (target) this.connections.delete(target);
+    else this.connections.clear();
+  }
+}
+
+class GainNodeMock extends AudioNodeMock {
+  constructor() {
+    super();
+    this.gain = {
+      value: 1,
+      setTargetAtTime: (value) => {
+        this.gain.value = value;
+      },
+    };
+  }
+}
+
+class AnalyserNodeMock extends AudioNodeMock {
+  constructor() {
+    super();
+    this.fftSize = 256;
+  }
+  getByteTimeDomainData(values) {
+    values.fill(129);
+  }
+}
+
+class AudioContextMock {
+  constructor() {
+    this.state = 'running';
+    this.currentTime = 0;
+    this.destination = new AudioNodeMock();
+  }
+  resume() {
+    this.state = 'running';
+    return Promise.resolve();
+  }
+  createMediaElementSource(element) {
+    if (mediaSources.has(element)) {
+      throw new Error('HTMLMediaElement already has a MediaElementAudioSourceNode');
+    }
+    const source = new AudioNodeMock();
+    mediaSources.set(element, source);
+    return source;
+  }
+  createGain() {
+    return new GainNodeMock();
+  }
+  createAnalyser() {
+    return new AnalyserNodeMock();
+  }
+}
+windowMock.AudioContext = AudioContextMock;
+
 const context = vm.createContext({
   Date: { now: () => clock },
   Element: ElementMock,
@@ -173,7 +251,9 @@ const context = vm.createContext({
   HTMLElement: HTMLElementMock,
   Node: NodeMock,
   ResizeObserver: ResizeObserverMock,
-  clearInterval() {},
+  clearInterval(id) {
+    if (intervals[id - 1]) intervals[id - 1].active = false;
+  },
   clearTimeout() {},
   document: documentMock,
   getComputedStyle() {
@@ -193,8 +273,8 @@ const context = vm.createContext({
   requestAnimationFrame(callback) {
     callback();
   },
-  setInterval(callback) {
-    intervals.push(callback);
+  setInterval(callback, delay) {
+    intervals.push({ callback, delay, active: true });
     return intervals.length;
   },
   setTimeout(callback) {
@@ -204,6 +284,12 @@ const context = vm.createContext({
   window: windowMock,
 });
 windowMock.window = windowMock;
+
+function runMainTick() {
+  const timer = intervals.find((entry) => entry.active && entry.delay === 1000);
+  assert.ok(timer, 'the active MAIN instance must own a maintenance tick');
+  timer.callback();
+}
 
 const source = fs.readFileSync(require.resolve('../main.js'), 'utf8');
 vm.runInContext(source, context, { filename: 'main.js' });
@@ -261,14 +347,14 @@ videoA.volume = 0.2;
 assert.equal(videoA.volume, 0.6, 'an automatic reset should restore the preferred value');
 
 currentVideo = videoB;
-intervals[0]();
+runMainTick();
 assert.equal(videoB.volume, 0.6, 'a replacement video should inherit the preferred value');
 currentVideo = videoA;
-intervals[0]();
+runMainTick();
 assert.equal(
   videoA.listenerCount('volumechange'),
-  1,
-  'returning to an earlier Shorts video must not duplicate listeners'
+  2,
+  'returning to an earlier Shorts video must keep one state and one Web Audio listener'
 );
 
 assert.ok(
@@ -286,7 +372,7 @@ assert.equal(
   'switching to the extension slider must be accepted'
 );
 currentVideo = videoA;
-intervals[0]();
+runMainTick();
 
 videoA.mutedWrites.length = 0;
 context.navigator.userActivation.hasBeenActive = false;
@@ -353,6 +439,16 @@ assert.equal(
 const nextInstance = windowMock[Symbol.for('ytev.main.instance.v2')];
 assert.notEqual(nextInstance, instance, 'the registry must hold the new generation');
 assert.equal(nextInstance.channel, nextChannel);
+assert.equal(
+  videoA.listenerCount('volumechange'),
+  1,
+  'takeover must remove the previous Web Audio listener from the active video'
+);
+assert.equal(
+  videoB.listenerCount('volumechange'),
+  0,
+  'takeover must remove Web Audio listeners from every graph, not only the active video'
+);
 assert.equal(
   nextInstance.update(secret, { settings: { gamma: 2 } }),
   false,

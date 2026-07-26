@@ -422,6 +422,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     ctx: null,
     unavailable: false,
     nodes: new WeakMap(),
+    // WeakMap удобен для поиска, но его нельзя обойти при dispose().
+    // Отдельная Map содержит только ещё подключённые графы и очищается,
+    // как только элемент уходит из документа или переводится на прямой путь.
+    liveNodes: new Map(),
     failedElements: new WeakSet(),
   };
   const drmElements = new WeakSet();
@@ -464,11 +468,20 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       const gain = audio.ctx.createGain();
       gain.gain.value = toReal(logicalOf(el));
       src.connect(gain).connect(audio.ctx.destination);
-      const node = { src, gain, target: gain.gain.value };
+      const node = {
+        src,
+        gain,
+        target: gain.gain.value,
+        onVolumeChange: null,
+        stopWatch: null,
+        released: false,
+      };
+      node.onVolumeChange = () => applyReal(el, toReal(logicalOf(el)));
       audio.nodes.set(el, node);
+      audio.liveNodes.set(el, node);
       // уровень задаёт gain, сам элемент держим на максимуме
       nativeDesc.set.call(el, 1);
-      el.addEventListener('volumechange', () => applyReal(el, toReal(logicalOf(el))));
+      el.addEventListener('volumechange', node.onVolumeChange);
       watchSilence(el, node);
       return node;
     } catch {
@@ -494,15 +507,24 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     let silentFor = 0;
     let lastTime = -1;
     let ticks = 0;
+    let timer = 0;
     const stop = () => {
+      if (!timer) return;
       clearInterval(timer);
+      timer = 0;
       try {
         node.gain.disconnect(analyser);
       } catch {}
+      if (node.stopWatch === stop) node.stopWatch = null;
     };
-    const timer = setInterval(() => {
-      if (!el.isConnected || audio.failedElements.has(el) || ++ticks > 240) {
-        stop(); // элемент ушёл, откат уже был или прошло 2 минуты
+    node.stopWatch = stop;
+    timer = setInterval(() => {
+      if (!el.isConnected) {
+        fallbackToDirect(el, node);
+        return;
+      }
+      if (audio.failedElements.has(el) || ++ticks > 240) {
+        stop(); // откат уже был или прошло 2 минуты
         return;
       }
       const playing = !el.paused && !el.muted && el.currentTime !== lastTime;
@@ -524,10 +546,23 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   }
 
   function fallbackToDirect(el, node) {
+    if (!node || node.released) return;
+    node.released = true;
     audio.failedElements.add(el);
     audio.nodes.delete(el);
+    audio.liveNodes.delete(el);
+    if (node.stopWatch) node.stopWatch();
+    if (node.onVolumeChange) {
+      el.removeEventListener('volumechange', node.onVolumeChange);
+      node.onVolumeChange = null;
+    }
     try {
       node.gain.disconnect();
+    } catch {}
+    try {
+      node.src.disconnect();
+    } catch {}
+    try {
       node.src.connect(audio.ctx.destination);
     } catch {}
     nativeDesc.set.call(el, Math.min(1, Math.max(0, node.target)));
@@ -2014,6 +2049,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   // YouTube — SPA: плеер может появляться/пересоздаваться при навигации.
   const tick = setInterval(() => {
+    // YouTube регулярно заменяет <video> в Shorts. Не оставляем старые
+    // слушатели и JS-ссылки жить до конца вкладки.
+    for (const [el, node] of audio.liveNodes) {
+      if (!el.isConnected) fallbackToDirect(el, node);
+    }
     bindVideo();
     ensureUI();
   }, 1000);
@@ -2063,9 +2103,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // MediaElementAudioSourceNode, и преемник уже не сможет его создать.
     // Поэтому не бросаем элементы с чужим усилением — переводим их на
     // прямую запись громкости тем же путём, что и сторож тишины.
-    for (const el of document.querySelectorAll('video, audio')) {
-      const node = audio.nodes.get(el);
-      if (node) fallbackToDirect(el, node);
+    for (const [el, node] of [...audio.liveNodes]) {
+      fallbackToDirect(el, node);
     }
     Object.defineProperty(mediaProto, 'volume', nativeDesc);
     Object.defineProperty(mediaProto, 'muted', nativeMutedDesc);
