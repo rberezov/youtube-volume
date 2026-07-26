@@ -131,6 +131,12 @@ async function run() {
     false,
     'main.js must only be injected with trusted executeScript arguments'
   );
+  const preloadEntry = manifest.content_scripts.find((entry) =>
+    entry.js.includes('preload.js')
+  );
+  assert.ok(preloadEntry, 'early MAIN-world preload must be registered');
+  assert.equal(preloadEntry.world, 'MAIN');
+  assert.equal(preloadEntry.run_at, 'document_start');
   assert.equal(
     manifest.content_scripts.some((entry) =>
       entry.matches.includes('https://music.youtube.com/*')

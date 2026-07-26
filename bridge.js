@@ -6,6 +6,20 @@
   const PAGE_ORIGIN = location.origin;
   const WRITE_INTERVAL_MS = 250;
   const INTENT_WINDOW_MS = 2000;
+  const EARLY_HIDE_STYLE_ID = 'ytev-early-native-volume-style';
+  const EARLY_HIDE_CLASS = 'ytev-native-volume-hidden';
+  const EARLY_HIDE_MANAGED_CLASS = 'ytev-native-volume-managed';
+  const EARLY_HIDE_CSS = `
+    .${EARLY_HIDE_CLASS} .ytp-volume-area,
+    .${EARLY_HIDE_CLASS} .ytp-volume-panel,
+    .${EARLY_HIDE_CLASS} .ytp-mute-button,
+    .${EARLY_HIDE_CLASS} ytd-reel-video-renderer volume-controls,
+    .${EARLY_HIDE_CLASS} ytd-reel-video-renderer .ytdVolumeControlsHost,
+    .${EARLY_HIDE_CLASS} ytd-shorts-player-controls volume-controls,
+    .${EARLY_HIDE_CLASS} ytd-shorts-player-controls .ytdVolumeControlsHost {
+      visibility: hidden !important;
+    }
+  `;
   const randomHex = (byteLength) =>
     Array.from(crypto.getRandomValues(new Uint8Array(byteLength)), (value) =>
       value.toString(16).padStart(2, '0')
@@ -26,6 +40,44 @@
   let pendingWrite = {};
   let writeTimer = 0;
   let lastWriteAt = 0;
+
+  // Читаем только один безопасный UI-флаг прямо из chrome.storage: для этого
+  // не нужно будить service worker. На document_start правило успевает встать
+  // до того, как YouTube создаст штатные контролы. Через 8 секунд оно само
+  // отпускается, если основной код не принял управление.
+  let earlyHideFailSafe = 0;
+  function setEarlyNativeHidden(hidden) {
+    const root = document.documentElement;
+    if (!root || !root.classList) return;
+    if (hidden) {
+      let style =
+        typeof document.getElementById === 'function'
+          ? document.getElementById(EARLY_HIDE_STYLE_ID)
+          : null;
+      if (!style && typeof document.createElement === 'function') {
+        style = document.createElement('style');
+        style.id = EARLY_HIDE_STYLE_ID;
+        style.textContent = EARLY_HIDE_CSS;
+        root.appendChild(style);
+      }
+      root.classList.add(EARLY_HIDE_CLASS);
+      clearTimeout(earlyHideFailSafe);
+      earlyHideFailSafe = setTimeout(() => {
+        if (!root.classList.contains(EARLY_HIDE_MANAGED_CLASS)) {
+          root.classList.remove(EARLY_HIDE_CLASS);
+        }
+      }, 8000);
+      return;
+    }
+    clearTimeout(earlyHideFailSafe);
+    root.classList.remove(EARLY_HIDE_CLASS);
+  }
+
+  try {
+    chrome.storage.sync.get({ useNativeSlider: false }, (settings) => {
+      setEarlyNativeHidden(settings.useNativeSlider === false);
+    });
+  } catch {}
 
   // Ползунок расширения даёт то же самое число, что уйдёт в сообщении, а
   // штатная панель YouTube показывает целые проценты — оттуда значение
@@ -125,6 +177,40 @@
     String(location.pathname || '').startsWith('/shorts/');
   const mediaSource = (video) =>
     video ? String(video.currentSrc || video.src || '') : '';
+  function activeReel() {
+    return (
+      document.querySelector('ytd-reel-video-renderer[is-active]') ||
+      document.querySelector(
+        '#reel-overlay-container ytd-reel-video-renderer'
+      ) ||
+      document.querySelector('ytd-reel-video-renderer')
+    );
+  }
+  const nativeVolumeControl = (target) => {
+    const classic = closest(target, '.ytp-volume-area, .ytp-volume-panel');
+    if (classic) return classic;
+    const shorts = closest(target, 'volume-controls, .ytdVolumeControlsHost');
+    if (!shorts) return null;
+    const reel = closest(shorts, 'ytd-reel-video-renderer');
+    const active = activeReel();
+    if (active) return reel === active ? shorts : null;
+    return reel && !reel.hidden ? shorts : null;
+  };
+
+  function shortsNativeSliderFromDom() {
+    if (
+      typeof document === 'undefined' ||
+      typeof document.querySelectorAll !== 'function'
+    ) {
+      return null;
+    }
+    const reel = activeReel();
+    if (!reel || typeof reel.querySelectorAll !== 'function') return null;
+    const sliders = reel.querySelectorAll(
+      'volume-controls input#volume-input'
+    );
+    return sliders.length === 1 ? sliders[0] : null;
+  }
 
   // Логический уровень глазами изолированного мира. Прочитать video.volume
   // здесь нельзя: подменённый геттер живёт в MAIN-мире, а сам элемент при
@@ -161,6 +247,13 @@
       document.querySelectorAll('.ytev-slider').length
     ) {
       return null;
+    }
+    const shortsSlider = shortsNativeSliderFromDom();
+    if (shortsSlider) {
+      const pct = Number(shortsSlider.value);
+      if (Number.isFinite(pct) && pct >= 0 && pct <= 100) {
+        return { pct, tolerance: EXACT_TOLERANCE };
+      }
     }
     const panel = document.querySelector('.ytp-volume-panel[aria-valuenow]');
     if (panel) {
@@ -251,6 +344,12 @@
       if (isEditable(e.target)) {
         // Для range браузер сам отправит trusted input уже с новым значением.
         // До него не открываем окно записи с неизвестным результатом.
+        if (
+          (e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
+          nativeVolumeControl(e.target)
+        ) {
+          grantVolumeFromDom(5000);
+        }
         return;
       }
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
@@ -268,9 +367,24 @@
   window.addEventListener(
     'input',
     (e) => {
-      if (!e.isTrusted || !matches(e.target, '.ytev-slider')) return;
-      const slider = extensionSliderFromDom();
-      if (slider && e.target === slider) grantSliderValue(slider);
+      if (!e.isTrusted) return;
+      if (matches(e.target, '.ytev-slider')) {
+        const slider = extensionSliderFromDom();
+        if (slider && e.target === slider) grantSliderValue(slider);
+        return;
+      }
+      const nativeSlider = shortsNativeSliderFromDom();
+      if (nativeSlider && e.target === nativeSlider) {
+        const pct = Number(nativeSlider.value);
+        if (Number.isFinite(pct) && pct >= 0 && pct <= 100) {
+          const video = activeVideo();
+          grantSliderIntent(
+            5000,
+            pct / 100,
+            pct > 0 ? false : video ? !!video.muted : undefined
+          );
+        }
+      }
     },
     true
   );
@@ -296,7 +410,7 @@
             next > 0 ? false : video ? !!video.muted : undefined
           );
         }
-      } else if (closest(e.target, '.ytp-volume-area, .ytp-volume-panel')) {
+      } else if (nativeVolumeControl(e.target)) {
         grantVolumeFromDom();
       }
     },
@@ -313,7 +427,7 @@
       }
       if (
         !closest(e.target, '.ytev-slider') &&
-        closest(e.target, '.ytp-volume-area, .ytp-volume-panel')
+        nativeVolumeControl(e.target)
       ) {
         grantVolumeFromDom();
       }
@@ -341,7 +455,7 @@
       if (!e.isTrusted || !(e.buttons & 1)) return;
       if (
         !closest(e.target, '.ytev-slider') &&
-        closest(e.target, '.ytp-volume-area, .ytp-volume-panel')
+        nativeVolumeControl(e.target)
       ) {
         grantVolumeFromDom();
       }
@@ -418,7 +532,14 @@
 
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === 'sync') sendRuntime('YTEV_UPDATE_SETTINGS');
+      if (area !== 'sync') return;
+      if (
+        changes.useNativeSlider &&
+        typeof changes.useNativeSlider.newValue === 'boolean'
+      ) {
+        setEarlyNativeHidden(changes.useNativeSlider.newValue === false);
+      }
+      sendRuntime('YTEV_UPDATE_SETTINGS');
     });
   } catch {}
 

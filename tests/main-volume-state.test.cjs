@@ -106,6 +106,16 @@ const windowListeners = new Map();
 const documentListeners = new Map();
 const intervals = [];
 const storage = new Map();
+const rootClasses = new Set();
+let nativeShortsSlider = null;
+const activeReel = {
+  querySelectorAll(selector) {
+    return selector === 'volume-controls input#volume-input' &&
+      nativeShortsSlider
+      ? [nativeShortsSlider]
+      : [];
+  },
+};
 
 const player = new HTMLElementMock();
 player.querySelector = (selector) => (selector === 'video' ? currentVideo : null);
@@ -154,6 +164,18 @@ const windowMock = {
 const documentMock = {
   hidden: true,
   documentElement: {
+    classList: {
+      add(value) {
+        rootClasses.add(value);
+      },
+      remove(...values) {
+        for (const value of values) rootClasses.delete(value);
+      },
+      toggle(value, force) {
+        if (force) rootClasses.add(value);
+        else rootClasses.delete(value);
+      },
+    },
     appendChild() {},
   },
   addEventListener(type, listener) {
@@ -167,6 +189,12 @@ const documentMock = {
   },
   getElementById(id) {
     return id === 'movie_player' ? player : null;
+  },
+  querySelector(selector) {
+    return selector === 'ytd-reel-video-renderer[is-active]' &&
+      nativeShortsSlider
+      ? activeReel
+      : null;
   },
   querySelectorAll(selector) {
     return selector === 'video, audio' ? [currentVideo] : [];
@@ -287,6 +315,16 @@ const context = vm.createContext({
   window: windowMock,
 });
 windowMock.window = windowMock;
+let preloadTakeovers = 0;
+windowMock[Symbol.for('ytev.preload.instance.v1')] = {
+  version: 1,
+  takeover() {
+    preloadTakeovers += 1;
+    return preloadTakeovers === 1
+      ? { volume: 0.45, volumeDirty: true }
+      : false;
+  },
+};
 
 function runMainTick() {
   const timer = intervals.find((entry) => entry.active && entry.delay === 1000);
@@ -309,12 +347,37 @@ assert.equal(
   ),
   true
 );
-assert.equal(videoA.volume, 0.4, 'saved volume should be restored on first bind');
+assert.equal(
+  videoA.volume,
+  0.45,
+  'trusted native input during preload must win over stale stored state'
+);
+assert.equal(preloadTakeovers, 1, 'the full instance must take over preload once');
 assert.equal(
   windowListeners.has('message'),
   false,
   'MAIN world must not accept settings through page-visible messages'
 );
+
+const nativeControl = new HTMLElementMock();
+nativeControl.closest = (selector) =>
+  selector === 'ytd-reel-video-renderer' ? activeReel : null;
+nativeShortsSlider = new HTMLInputElementMock();
+nativeShortsSlider.value = '73';
+nativeShortsSlider.closest = (selector) =>
+  selector === 'volume-controls, .ytdVolumeControlsHost'
+    ? nativeControl
+    : null;
+windowListeners.get('input')[0]({
+  isTrusted: true,
+  target: nativeShortsSlider,
+});
+assert.equal(
+  videoA.volume,
+  0.73,
+  'trusted input from the real native Shorts slider must set volume directly'
+);
+nativeShortsSlider = null;
 
 const instance = windowMock[Symbol.for('ytev.main.instance.v2')];
 assert.equal(instance.version, 2);
@@ -402,6 +465,11 @@ assert.equal(
   instance.update(secret, { settings: { useNativeSlider: false } }),
   true,
   'switching to the extension slider must be accepted'
+);
+assert.equal(
+  JSON.parse(storage.get('ytev-volume-state-v1')).useNativeSlider,
+  false,
+  'the custom-slider choice must be cached for the next document_start'
 );
 currentVideo = videoA;
 runMainTick();
