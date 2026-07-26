@@ -151,6 +151,7 @@
   // того, как громкость применилась, — на volumechange (он приходит и в
   // изолированный мир) плюс страховочная проба по таймеру. main.js шлёт
   // своё сообщение через 250мс дебаунса, то есть заведомо позже.
+  let sampleSource = null;
   function grantVolumeFromDom(duration = INTENT_WINDOW_MS) {
     const sample = () => {
       const observed = logicalPercentFromDom();
@@ -158,10 +159,18 @@
       grantVolumeIntent(duration, observed.pct / 100, observed.tolerance);
     };
     const video = activeVideo();
-    if (video && typeof video.addEventListener === 'function') {
+    // Протяжка по штатной панели шлёт pointermove десятками в секунду, и
+    // без этой проверки на элементе одновременно жило бы столько же
+    // одинаковых слушателей. Хватает одного: каждая проба всё равно
+    // переоткрывает окно с новым значением.
+    if (video && typeof video.addEventListener === 'function' && sampleSource !== video) {
       const onChange = () => setTimeout(sample, 0);
+      sampleSource = video;
       video.addEventListener('volumechange', onChange);
-      setTimeout(() => video.removeEventListener('volumechange', onChange), 400);
+      setTimeout(() => {
+        video.removeEventListener('volumechange', onChange);
+        if (sampleSource === video) sampleSource = null;
+      }, 400);
     }
     setTimeout(sample, 120);
   }
