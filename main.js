@@ -38,6 +38,21 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     } catch {}
   }
 
+  // preload.js уже стоит в MAIN-мире с document_start и удерживает
+  // сохранённый уровень, пока service worker читает chrome.storage.
+  // Снимаем его синхронный перехват до захвата нативных дескрипторов:
+  // дальше полный экземпляр отвечает и за кривую, и за состояние.
+  const preload = window[Symbol.for('ytev.preload.instance.v1')];
+  if (
+    preload &&
+    preload.version === 1 &&
+    typeof preload.takeover === 'function'
+  ) {
+    try {
+      preload.takeover();
+    } catch {}
+  }
+
   // Снятие всего, что экземпляр развесил на window/document. Нужно для
   // dispose(): без этого старое поколение продолжало бы жить слушателями.
   const teardown = [];
@@ -212,6 +227,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         JSON.stringify({
           volume: validVolume(preferredVolume) ? preferredVolume : null,
           muted: typeof preferredMuted === 'boolean' ? preferredMuted : null,
+          enabled: SETTINGS.enabled,
+          gamma: SETTINGS.gamma,
         })
       );
     } catch {}
@@ -708,8 +725,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         }
       }
       volumeStateLoaded = true;
-      cachePreferredState();
     }
+    cachePreferredState();
     reapplyCurve();
     bindVideo();
     ensureUI(); // включение/выключение своей шкалы должно срабатывать сразу
