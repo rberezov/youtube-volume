@@ -84,6 +84,7 @@ class MutationObserverMock {
 }
 
 const document = new EventTargetMock();
+document.querySelector = () => null;
 document.querySelectorAll = () => [];
 const localStorage = {
   getItem(key) {
@@ -96,7 +97,7 @@ const localStorage = {
     });
   },
 };
-const window = {};
+const window = new EventTargetMock();
 const nativeVolume = Object.getOwnPropertyDescriptor(
   HTMLMediaElementMock.prototype,
   'volume'
@@ -131,9 +132,28 @@ assert.ok(
   'cached output must be applied synchronously before native play()'
 );
 
+const nativeShortsControl = {
+  closest(selector) {
+    if (selector === 'volume-controls, .ytdVolumeControlsHost') return this;
+    if (selector === 'ytd-reel-video-renderer') return {};
+    return null;
+  },
+};
+window.listeners.get('pointerdown')[0]({
+  isTrusted: true,
+  target: nativeShortsControl,
+});
+video.volume = 0.7;
+assert.ok(
+  Math.abs(video._volume - Math.pow(0.7, 3)) < 1e-9,
+  'trusted native control input must change output while preload is active'
+);
+
 const api = window[Symbol.for('ytev.preload.instance.v1')];
 assert.equal(api.version, 1);
-assert.equal(api.takeover(), true);
+const takeoverState = api.takeover();
+assert.equal(takeoverState.volume, 0.7);
+assert.equal(takeoverState.volumeDirty, true);
 assert.equal(observer.connected, false);
 assert.equal(
   Object.getOwnPropertyDescriptor(HTMLMediaElementMock.prototype, 'volume').get,

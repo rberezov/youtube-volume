@@ -43,13 +43,15 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // Снимаем его синхронный перехват до захвата нативных дескрипторов:
   // дальше полный экземпляр отвечает и за кривую, и за состояние.
   const preload = window[Symbol.for('ytev.preload.instance.v1')];
+  let preloadState = null;
   if (
     preload &&
     preload.version === 1 &&
     typeof preload.takeover === 'function'
   ) {
     try {
-      preload.takeover();
+      const state = preload.takeover();
+      if (state && typeof state === 'object') preloadState = state;
     } catch {}
   }
 
@@ -248,6 +250,16 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       preferredMuted = cached.muted;
     }
   } catch {}
+  const preloadVolume = Number(preloadState && preloadState.volume);
+  if (
+    preloadState &&
+    preloadState.volumeDirty === true &&
+    validVolume(preloadVolume)
+  ) {
+    preferredVolume = preloadVolume;
+    preferredVolumeDirty = true;
+    rememberAudible(preloadVolume);
+  }
 
   function rememberVolume(value, persist = false) {
     const volume = Number(value);
@@ -319,6 +331,86 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // совпадать в обоих мирах, иначе один считает действие осознанным, а
   // второй отказывается его сохранять.
   const PLAYER_SELECTOR = '#movie_player, .html5-video-player, ytd-reel-video-renderer';
+  const nativeVolumeControl = (target) => {
+    if (!(target instanceof Element)) return null;
+    const classic = target.closest('.ytp-volume-area, .ytp-volume-panel');
+    if (classic) return classic;
+    const shorts = target.closest('volume-controls, .ytdVolumeControlsHost');
+    if (!shorts) return null;
+    const reel = shorts.closest('ytd-reel-video-renderer');
+    const active = activeReel();
+    if (active) return reel === active ? shorts : null;
+    return reel && !reel.hidden ? shorts : null;
+  };
+  const shortsNativeSlider = () => {
+    const reel = activeReel();
+    if (!reel || typeof reel.querySelectorAll !== 'function') return null;
+    const sliders = reel.querySelectorAll(
+      'volume-controls input#volume-input'
+    );
+    return sliders.length === 1 ? sliders[0] : null;
+  };
+  const nativePercentFromControl = (target) => {
+    const shortsSlider = shortsNativeSlider();
+    if (shortsSlider && target === shortsSlider) {
+      const pct = Number(shortsSlider.value);
+      return Number.isFinite(pct) && pct >= 0 && pct <= 100
+        ? pct
+        : null;
+    }
+    const panel =
+      target instanceof Element
+        ? target.closest('.ytp-volume-panel[aria-valuenow]')
+        : null;
+    const fallbackPanel =
+      panel ||
+      (getPlayer() &&
+        getPlayer().querySelector('.ytp-volume-panel[aria-valuenow]'));
+    if (!fallbackPanel) return null;
+    const pct = Number(fallbackPanel.getAttribute('aria-valuenow'));
+    return Number.isFinite(pct) && pct >= 0 && pct <= 100 ? pct : null;
+  };
+  const applyTrustedNativeVolume = (target) => {
+    if (!SETTINGS.useNativeSlider || !nativeVolumeControl(target)) {
+      return false;
+    }
+    const pct = nativePercentFromControl(target);
+    const video = getVideo();
+    if (pct == null || !video) return false;
+    const volume = pct / 100;
+    markVolumeIntent(5000);
+    rememberVolume(volume, true);
+    if (volume > 0 && video.muted) {
+      markMutedIntent(5000);
+      rememberMuted(false, true);
+      const player = getPlayer();
+      if (player && typeof player.unMute === 'function') player.unMute();
+      video.muted = false;
+    }
+    video.volume = volume;
+    updateUI();
+    return true;
+  };
+  let nativeApplyTimer = 0;
+  const scheduleTrustedNativeVolume = (target) => {
+    if (!SETTINGS.useNativeSlider || !nativeVolumeControl(target)) return;
+    const video = getVideo();
+    const source = mediaSource(video);
+    clearTimeout(nativeApplyTimer);
+    nativeApplyTimer = setTimeout(() => {
+      nativeApplyTimer = 0;
+      const current = getVideo();
+      const currentSource = mediaSource(current);
+      if (
+        video &&
+        (current !== video ||
+          (source && currentSource && source !== currentSource))
+      ) {
+        return;
+      }
+      applyTrustedNativeVolume(target);
+    }, 0);
+  };
   const insidePlayer = (target) => {
     const player = getPlayer();
     if (player && target instanceof Node && player.contains(target)) return true;
@@ -337,7 +429,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       const isOwnSlider =
         target instanceof HTMLInputElement && target.classList.contains('ytev-slider');
       if (isEditableTarget(target)) {
-        if (isOwnSlider && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        if (
+          (isOwnSlider || nativeVolumeControl(target)) &&
+          (e.key === 'ArrowUp' || e.key === 'ArrowDown')
+        ) {
           markVolumeIntent();
         }
         return;
@@ -365,10 +460,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     'wheel',
     (e) => {
       const target = e.target instanceof Element ? e.target : null;
-      if (
-        target &&
-        target.closest('.ytp-volume-area, .ytp-volume-panel')
-      ) {
+      if (target && nativeVolumeControl(target)) {
         markVolumeIntent();
       }
     },
@@ -382,8 +474,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       const target = e.target instanceof Element ? e.target : null;
       if (!target) return;
       if (target.closest('.ytp-mute-button, .ytev-mute')) markMutedIntent(5000);
-      if (target.closest('.ytp-volume-area, .ytp-volume-panel, .ytev-slider')) {
+      if (nativeVolumeControl(target) || target.closest('.ytev-slider')) {
         markVolumeIntent(5000);
+        scheduleTrustedNativeVolume(target);
       }
     },
     true
@@ -395,8 +488,12 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     (e) => {
       if (!(e.buttons & 1)) return;
       const target = e.target instanceof Element ? e.target : null;
-      if (target && target.closest('.ytp-volume-area, .ytp-volume-panel, .ytev-slider')) {
+      if (
+        target &&
+        (nativeVolumeControl(target) || target.closest('.ytev-slider'))
+      ) {
         markVolumeIntent(1500);
+        scheduleTrustedNativeVolume(target);
       }
     },
     true
@@ -725,6 +822,14 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         }
       }
       volumeStateLoaded = true;
+      if (
+        preloadState &&
+        preloadState.volumeDirty === true &&
+        validVolume(Number(preloadState.volume))
+      ) {
+        rememberVolume(Number(preloadState.volume), true);
+      }
+      preloadState = null;
     }
     cachePreferredState();
     reapplyCurve();
@@ -1714,10 +1819,15 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   // активная лента: атрибута is-active в новом интерфейсе нет, зато
   // отрисованная лента лежит в #reel-overlay-container
-  const activeReel = () =>
-    document.querySelector('ytd-reel-video-renderer[is-active]') ||
-    document.querySelector('#reel-overlay-container ytd-reel-video-renderer') ||
-    document.querySelector('ytd-reel-video-renderer');
+  function activeReel() {
+    return (
+      document.querySelector('ytd-reel-video-renderer[is-active]') ||
+      document.querySelector(
+        '#reel-overlay-container ytd-reel-video-renderer'
+      ) ||
+      document.querySelector('ytd-reel-video-renderer')
+    );
+  }
 
   const shortsScope = () =>
     activeReel() ||
@@ -2085,7 +2195,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     window,
     'input',
     (e) => {
-      if (!e.isTrusted || !ui || e.target !== ui.slider) return;
+      if (!e.isTrusted) return;
+      if (SETTINGS.useNativeSlider && applyTrustedNativeVolume(e.target)) {
+        return;
+      }
+      if (!ui || e.target !== ui.slider) return;
       applySliderValue(ui.slider);
     },
     true

@@ -125,6 +125,40 @@
     String(location.pathname || '').startsWith('/shorts/');
   const mediaSource = (video) =>
     video ? String(video.currentSrc || video.src || '') : '';
+  function activeReel() {
+    return (
+      document.querySelector('ytd-reel-video-renderer[is-active]') ||
+      document.querySelector(
+        '#reel-overlay-container ytd-reel-video-renderer'
+      ) ||
+      document.querySelector('ytd-reel-video-renderer')
+    );
+  }
+  const nativeVolumeControl = (target) => {
+    const classic = closest(target, '.ytp-volume-area, .ytp-volume-panel');
+    if (classic) return classic;
+    const shorts = closest(target, 'volume-controls, .ytdVolumeControlsHost');
+    if (!shorts) return null;
+    const reel = closest(shorts, 'ytd-reel-video-renderer');
+    const active = activeReel();
+    if (active) return reel === active ? shorts : null;
+    return reel && !reel.hidden ? shorts : null;
+  };
+
+  function shortsNativeSliderFromDom() {
+    if (
+      typeof document === 'undefined' ||
+      typeof document.querySelectorAll !== 'function'
+    ) {
+      return null;
+    }
+    const reel = activeReel();
+    if (!reel || typeof reel.querySelectorAll !== 'function') return null;
+    const sliders = reel.querySelectorAll(
+      'volume-controls input#volume-input'
+    );
+    return sliders.length === 1 ? sliders[0] : null;
+  }
 
   // Логический уровень глазами изолированного мира. Прочитать video.volume
   // здесь нельзя: подменённый геттер живёт в MAIN-мире, а сам элемент при
@@ -161,6 +195,13 @@
       document.querySelectorAll('.ytev-slider').length
     ) {
       return null;
+    }
+    const shortsSlider = shortsNativeSliderFromDom();
+    if (shortsSlider) {
+      const pct = Number(shortsSlider.value);
+      if (Number.isFinite(pct) && pct >= 0 && pct <= 100) {
+        return { pct, tolerance: EXACT_TOLERANCE };
+      }
     }
     const panel = document.querySelector('.ytp-volume-panel[aria-valuenow]');
     if (panel) {
@@ -251,6 +292,12 @@
       if (isEditable(e.target)) {
         // Для range браузер сам отправит trusted input уже с новым значением.
         // До него не открываем окно записи с неизвестным результатом.
+        if (
+          (e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
+          nativeVolumeControl(e.target)
+        ) {
+          grantVolumeFromDom(5000);
+        }
         return;
       }
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
@@ -268,9 +315,24 @@
   window.addEventListener(
     'input',
     (e) => {
-      if (!e.isTrusted || !matches(e.target, '.ytev-slider')) return;
-      const slider = extensionSliderFromDom();
-      if (slider && e.target === slider) grantSliderValue(slider);
+      if (!e.isTrusted) return;
+      if (matches(e.target, '.ytev-slider')) {
+        const slider = extensionSliderFromDom();
+        if (slider && e.target === slider) grantSliderValue(slider);
+        return;
+      }
+      const nativeSlider = shortsNativeSliderFromDom();
+      if (nativeSlider && e.target === nativeSlider) {
+        const pct = Number(nativeSlider.value);
+        if (Number.isFinite(pct) && pct >= 0 && pct <= 100) {
+          const video = activeVideo();
+          grantSliderIntent(
+            5000,
+            pct / 100,
+            pct > 0 ? false : video ? !!video.muted : undefined
+          );
+        }
+      }
     },
     true
   );
@@ -296,7 +358,7 @@
             next > 0 ? false : video ? !!video.muted : undefined
           );
         }
-      } else if (closest(e.target, '.ytp-volume-area, .ytp-volume-panel')) {
+      } else if (nativeVolumeControl(e.target)) {
         grantVolumeFromDom();
       }
     },
@@ -313,7 +375,7 @@
       }
       if (
         !closest(e.target, '.ytev-slider') &&
-        closest(e.target, '.ytp-volume-area, .ytp-volume-panel')
+        nativeVolumeControl(e.target)
       ) {
         grantVolumeFromDom();
       }
@@ -341,7 +403,7 @@
       if (!e.isTrusted || !(e.buttons & 1)) return;
       if (
         !closest(e.target, '.ytev-slider') &&
-        closest(e.target, '.ytp-volume-area, .ytp-volume-panel')
+        nativeVolumeControl(e.target)
       ) {
         grantVolumeFromDom();
       }

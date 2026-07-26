@@ -37,15 +37,24 @@
   const gamma = Number.isFinite(cachedGamma)
     ? Math.min(6, Math.max(1, cachedGamma))
     : 3;
-  const output = enabled ? Math.pow(volume, gamma) : volume;
+  let heldVolume = volume;
+  let volumeDirty = false;
+  let volumeIntentUntil = 0;
+  let volumeIntentBudget = 0;
+  let volumeIntentVideo = null;
+  let volumeIntentSource = '';
+  let expectedVolume;
   const shouldMute = cached && cached.muted === true;
   const logicalVolume = new WeakMap();
   let active = true;
 
+  const outputVolume = () =>
+    enabled ? Math.pow(heldVolume, gamma) : heldVolume;
+
   const applyCachedOutput = (media) => {
     if (!active || !(media instanceof HTMLMediaElement)) return;
     try {
-      nativeVolume.set.call(media, output);
+      nativeVolume.set.call(media, outputVolume());
       // Включать mute заранее безопасно. Снимать его до основного кода
       // нельзя: на новой вкладке это может нарушить политику autoplay.
       if (shouldMute) nativeMuted.set.call(media, true);
@@ -53,7 +62,7 @@
   };
 
   const earlyVolumeGet = function () {
-    return logicalVolume.has(this) ? logicalVolume.get(this) : volume;
+    return logicalVolume.has(this) ? logicalVolume.get(this) : heldVolume;
   };
   const earlyVolumeSet = function (value) {
     const requested = Number(value);
@@ -61,9 +70,13 @@
       nativeVolume.set.call(this, value);
       return;
     }
-    // YouTube может успеть выставить 100% до запуска main.js. Возвращаем
-    // странице её логическое значение, но физический выход пока удерживаем
-    // на сохранённом уровне, чтобы ни один первый кадр не прозвучал громче.
+    // Автоматические записи YouTube пока удерживаем на сохранённом уровне.
+    // Доверенный жест над штатным контролом заранее открывает короткое
+    // окно, чтобы он работал даже во время холодного запуска service worker.
+    if (consumeVolumeIntent(this, requested)) {
+      heldVolume = requested;
+      volumeDirty = true;
+    }
     logicalVolume.set(this, requested);
     applyCachedOutput(this);
   };
@@ -84,6 +97,106 @@
     return nativePlay.apply(this, args);
   };
   mediaProto.play = earlyPlay;
+
+  const closest = (target, selector) =>
+    target && typeof target.closest === 'function'
+      ? target.closest(selector)
+      : null;
+  const activeReel = () =>
+    document.querySelector('ytd-reel-video-renderer[is-active]') ||
+    document.querySelector(
+      '#reel-overlay-container ytd-reel-video-renderer'
+    ) ||
+    document.querySelector('ytd-reel-video-renderer');
+  const nativeVolumeControl = (target) => {
+    const classic = closest(target, '.ytp-volume-area, .ytp-volume-panel');
+    if (classic) return classic;
+    const shorts = closest(target, 'volume-controls, .ytdVolumeControlsHost');
+    if (!shorts) return null;
+    const reel = closest(shorts, 'ytd-reel-video-renderer');
+    const active = activeReel();
+    if (active) return reel === active ? shorts : null;
+    return reel && !reel.hidden ? shorts : null;
+  };
+  const activeVideo = () =>
+    (activeReel() && activeReel().querySelector('video')) ||
+    document.querySelector('#movie_player video') ||
+    document.querySelector('video');
+  const mediaSource = (media) =>
+    media ? String(media.currentSrc || media.src || '') : '';
+  const grantVolumeIntent = (duration = 5000, expected) => {
+    volumeIntentVideo = activeVideo();
+    volumeIntentSource = mediaSource(volumeIntentVideo);
+    volumeIntentUntil = Date.now() + duration;
+    volumeIntentBudget = 1;
+    expectedVolume = expected;
+  };
+  const consumeVolumeIntent = (media, requested) => {
+    if (Date.now() > volumeIntentUntil || volumeIntentBudget < 1) return false;
+    if (volumeIntentVideo && media !== volumeIntentVideo) return false;
+    const source = mediaSource(media);
+    if (
+      volumeIntentSource &&
+      source &&
+      volumeIntentSource !== source
+    ) {
+      return false;
+    }
+    if (
+      expectedVolume !== undefined &&
+      Math.abs(requested - expectedVolume) > 1e-6
+    ) {
+      return false;
+    }
+    volumeIntentBudget = 0;
+    expectedVolume = undefined;
+    return true;
+  };
+  const onPointerDown = (event) => {
+    if (event.isTrusted && nativeVolumeControl(event.target)) {
+      grantVolumeIntent();
+    }
+  };
+  const onPointerMove = (event) => {
+    if (
+      event.isTrusted &&
+      event.buttons & 1 &&
+      nativeVolumeControl(event.target)
+    ) {
+      grantVolumeIntent();
+    }
+  };
+  const onWheel = (event) => {
+    if (event.isTrusted && nativeVolumeControl(event.target)) {
+      grantVolumeIntent();
+    }
+  };
+  const onKeyDown = (event) => {
+    if (
+      event.isTrusted &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      (event.key === 'ArrowUp' || event.key === 'ArrowDown') &&
+      nativeVolumeControl(event.target)
+    ) {
+      grantVolumeIntent();
+    }
+  };
+  const onNativeInput = (event) => {
+    if (!event.isTrusted || !nativeVolumeControl(event.target)) return;
+    const pct = Number(event.target && event.target.value);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) return;
+    grantVolumeIntent(5000, pct / 100);
+    heldVolume = pct / 100;
+    volumeDirty = true;
+    document.querySelectorAll('video, audio').forEach(applyCachedOutput);
+  };
+  window.addEventListener('pointerdown', onPointerDown, true);
+  window.addEventListener('pointermove', onPointerMove, true);
+  window.addEventListener('wheel', onWheel, true);
+  window.addEventListener('keydown', onKeyDown, true);
+  window.addEventListener('input', onNativeInput, true);
 
   const onMediaReady = (event) => applyCachedOutput(event.target);
   for (const type of ['loadstart', 'loadedmetadata', 'play']) {
@@ -112,6 +225,11 @@
       for (const type of ['loadstart', 'loadedmetadata', 'play']) {
         document.removeEventListener(type, onMediaReady, true);
       }
+      window.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('pointermove', onPointerMove, true);
+      window.removeEventListener('wheel', onWheel, true);
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('input', onNativeInput, true);
       const currentVolume = Object.getOwnPropertyDescriptor(mediaProto, 'volume');
       if (
         currentVolume &&
@@ -121,7 +239,7 @@
         Object.defineProperty(mediaProto, 'volume', nativeVolume);
       }
       if (mediaProto.play === earlyPlay) mediaProto.play = nativePlay;
-      return true;
+      return { volume: heldVolume, volumeDirty };
     },
   });
 

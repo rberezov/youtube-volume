@@ -26,7 +26,21 @@ const locationMock = {
 // Что изолированный мир видит в DOM: собственный ползунок расширения и/или
 // штатная панель YouTube с процентами. Именно отсюда bridge берёт значение,
 // которым подтверждает запись после стрелок, колеса и штатных контролов.
-const page = { sliders: [], ariaVolume: 42, video: activeVideo };
+const page = {
+  sliders: [],
+  shortsSlider: null,
+  ariaVolume: 42,
+  video: activeVideo,
+};
+const shortsReel = {
+  hidden: false,
+  querySelectorAll(selector) {
+    return selector === 'volume-controls input#volume-input' &&
+      page.shortsSlider
+      ? [page.shortsSlider]
+      : [];
+  },
+};
 const volumePanel = {
   getAttribute(name) {
     return name === 'aria-valuenow' ? String(page.ariaVolume) : null;
@@ -38,10 +52,25 @@ const documentMock = {
     if (selector.includes('ytp-volume-panel')) {
       return page.ariaVolume == null ? null : volumePanel;
     }
-    return selector.includes('video') ? page.video : null;
+    if (
+      selector === 'ytd-reel-video-renderer[is-active]' ||
+      selector === '#reel-overlay-container ytd-reel-video-renderer' ||
+      selector === 'ytd-reel-video-renderer'
+    ) {
+      return page.shortsSlider ? shortsReel : null;
+    }
+    return selector.includes(' video') ||
+      selector === '#movie_player video' ||
+      selector === 'video'
+      ? page.video
+      : null;
   },
   querySelectorAll(selector) {
-    return selector === '.ytev-slider' ? page.sliders : [];
+    if (selector === '.ytev-slider') return page.sliders;
+    if (selector.includes('volume-controls input#volume-input')) {
+      return page.shortsSlider ? [page.shortsSlider] : [];
+    }
+    return [];
   },
 };
 
@@ -465,6 +494,37 @@ onMessage({
 assert.equal(saved.length, 8, 'the extension slider position must be written');
 assert.equal(saved[7].savedVolume, 0.55);
 page.sliders = [];
+
+// Новый штатный контрол Shorts находится вне .ytp-volume-panel. Его
+// доверенный input должен разрешать ровно показанное на нём значение.
+now += 300;
+locationMock.pathname = '/shorts/example';
+const shortsNativeSlider = {
+  tagName: 'INPUT',
+  value: '73',
+  matches() {
+    return false;
+  },
+  closest(selector) {
+    if (selector === 'volume-controls, .ytdVolumeControlsHost') return this;
+    if (selector === 'ytd-reel-video-renderer') return shortsReel;
+    return null;
+  },
+};
+page.shortsSlider = shortsNativeSlider;
+listeners.get('input')({
+  isTrusted: true,
+  target: shortsNativeSlider,
+});
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 0.73 },
+});
+assert.equal(saved.length, 9, 'the native Shorts slider value must be written');
+assert.equal(saved[8].savedVolume, 0.73);
+page.shortsSlider = null;
+locationMock.pathname = '/watch';
 
 onStorageChanged({ gamma: { newValue: 2.5 } }, 'sync');
 assert.equal(runtimeMessages.length, 2);
