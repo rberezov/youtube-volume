@@ -120,6 +120,12 @@
     return document.querySelector('video');
   }
 
+  const isShorts = () =>
+    typeof location === 'object' &&
+    String(location.pathname || '').startsWith('/shorts/');
+  const mediaSource = (video) =>
+    video ? String(video.currentSrc || video.src || '') : '';
+
   // Логический уровень глазами изолированного мира. Прочитать video.volume
   // здесь нельзя: подменённый геттер живёт в MAIN-мире, а сам элемент при
   // включённом Web Audio держится на максимуме — уровень задаёт усилитель.
@@ -173,12 +179,22 @@
   // своё сообщение через 250мс дебаунса, то есть заведомо позже.
   let sampleSource = null;
   function grantVolumeFromDom(duration = INTENT_WINDOW_MS) {
+    const video = activeVideo();
+    const sourceAtIntent = mediaSource(video);
     const sample = () => {
+      const currentVideo = activeVideo();
+      const currentSource = mediaSource(currentVideo);
+      if (
+        video &&
+        (currentVideo !== video ||
+          (sourceAtIntent && currentSource && sourceAtIntent !== currentSource))
+      ) {
+        return;
+      }
       const observed = logicalPercentFromDom();
       if (!observed) return;
       grantVolumeIntent(duration, observed.pct / 100, observed.tolerance);
     };
-    const video = activeVideo();
     // Протяжка по штатной панели шлёт pointermove десятками в секунду, и
     // без этой проверки на элементе одновременно жило бы столько же
     // одинаковых слушателей. Хватает одного: каждая проба всё равно
@@ -238,7 +254,7 @@
         return;
       }
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-        if (closest(e.target, PLAYER_SELECTOR)) {
+        if (!isShorts() && closest(e.target, PLAYER_SELECTOR)) {
           grantVolumeFromDom();
         }
       } else if (!e.repeat && String(e.key).toLowerCase() === 'm') {
@@ -280,7 +296,7 @@
             next > 0 ? false : video ? !!video.muted : undefined
           );
         }
-      } else if (closest(e.target, PLAYER_SELECTOR)) {
+      } else if (closest(e.target, '.ytp-volume-area, .ytp-volume-panel')) {
         grantVolumeFromDom();
       }
     },

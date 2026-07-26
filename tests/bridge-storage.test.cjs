@@ -18,6 +18,10 @@ const activeVideo = {
   addEventListener() {},
   removeEventListener() {},
 };
+const locationMock = {
+  origin: 'https://www.youtube.com',
+  pathname: '/watch',
+};
 
 // Что изолированный мир видит в DOM: собственный ползунок расширения и/или
 // штатная панель YouTube с процентами. Именно отсюда bridge берёт значение,
@@ -89,7 +93,7 @@ const context = vm.createContext({
   },
   Date: { now: () => now },
   document: documentMock,
-  location: { origin: 'https://www.youtube.com' },
+  location: locationMock,
   window: windowMock,
   setTimeout(callback) {
     callback();
@@ -121,6 +125,29 @@ onMessage({
   data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 0.42 },
 });
 assert.equal(saved.length, 0, 'a save without trusted user intent must be ignored');
+
+// In Shorts a wheel over the video navigates the feed. It must not authorize
+// the 100% value that YouTube applies while activating the next item.
+locationMock.pathname = '/shorts/example';
+page.ariaVolume = 100;
+listeners.get('wheel')({
+  isTrusted: true,
+  deltaY: 100,
+  shiftKey: false,
+  target: {
+    closest(selector) {
+      return selector.includes('#movie_player') ? this : null;
+    },
+  },
+});
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 1 },
+});
+assert.equal(saved.length, 0, 'Shorts navigation wheel must not authorize a volume save');
+locationMock.pathname = '/watch';
+page.ariaVolume = 42;
 
 const onKeyDown = listeners.get('keydown');
 onKeyDown({
