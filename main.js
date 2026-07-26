@@ -42,6 +42,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // сохранённый уровень, пока service worker читает chrome.storage.
   // Снимаем его синхронный перехват до захвата нативных дескрипторов:
   // дальше полный экземпляр отвечает и за кривую, и за состояние.
+  // Форму объекта подделать нетрудно, поэтому из ответа берём ровно два
+  // поля и только в допустимом виде — ни одно постороннее свойство внутрь
+  // не проходит. Сам слот реестра preload занимает первым делом, ещё до
+  // своих ранних выходов, так что чужому объекту там взяться неоткуда.
   const preload = window[Symbol.for('ytev.preload.instance.v1')];
   let preloadState = null;
   if (
@@ -51,7 +55,17 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   ) {
     try {
       const state = preload.takeover();
-      if (state && typeof state === 'object') preloadState = state;
+      const heldVolume = Number(state && state.volume);
+      if (
+        state &&
+        typeof state === 'object' &&
+        state.volumeDirty === true &&
+        Number.isFinite(heldVolume) &&
+        heldVolume >= 0 &&
+        heldVolume <= 1
+      ) {
+        preloadState = { volume: heldVolume, volumeDirty: true };
+      }
     } catch {}
   }
 
@@ -380,16 +394,17 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         ? pct
         : null;
     }
+    if (!(target instanceof Element)) return null;
+    // Запасную панель ищем только внутри области громкости, где произошло
+    // событие. Раньше отсюда брался ползунок плеера, даже когда жест пришёл
+    // от совсем другого контрола, — и сохранялся уровень, который
+    // пользователь не трогал.
+    const area = target.closest('.ytp-volume-area, .ytp-volume-panel');
     const panel =
-      target instanceof Element
-        ? target.closest('.ytp-volume-panel[aria-valuenow]')
-        : null;
-    const fallbackPanel =
-      panel ||
-      (getPlayer() &&
-        getPlayer().querySelector('.ytp-volume-panel[aria-valuenow]'));
-    if (!fallbackPanel) return null;
-    const pct = Number(fallbackPanel.getAttribute('aria-valuenow'));
+      target.closest('.ytp-volume-panel[aria-valuenow]') ||
+      (area && area.querySelector('.ytp-volume-panel[aria-valuenow]'));
+    if (!panel) return null;
+    const pct = Number(panel.getAttribute('aria-valuenow'));
     return Number.isFinite(pct) && pct >= 0 && pct <= 100 ? pct : null;
   };
   const applyTrustedNativeVolume = (target) => {

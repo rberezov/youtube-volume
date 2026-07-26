@@ -19,8 +19,39 @@
       visibility: hidden !important;
     }
   `;
+  // Окно доверия держим таким же коротким, как в bridge.js: за это время
+  // YouTube успевает применить жест, а лишние секунды только расширяют
+  // промежуток, в который может вклиниться скрипт страницы.
+  const INTENT_WINDOW_MS = 2000;
+  // Штатная панель YouTube показывает целые проценты, поэтому сверка с ней
+  // огрублённая — как ARIA_TOLERANCE в bridge.js.
+  const DOM_TOLERANCE = 0.015;
+
   const existing = window[INSTANCE_KEY];
   if (existing && existing.version === 1) return;
+
+  // Слот реестра занимаем ПЕРВЫМ делом — до всех ранних выходов. Ключ
+  // глобального реестра символов угадывается тривиально, а main.js забирает
+  // отсюда удержанный уровень. Если preload выйдет, не заняв слот (кэша нет,
+  // битый JSON, чужие дескрипторы), объект объявит скрипт страницы, и main.js
+  // примет подставленное значение за выбор пользователя. Наружу отдаём
+  // замороженный объект с делегирующим takeover: реализация подставляется
+  // ниже и остаётся в замыкании, поэтому странице её не подменить.
+  let takeoverImpl = () => false;
+  const api = Object.freeze({
+    version: 1,
+    takeover: () => takeoverImpl(),
+  });
+  try {
+    Object.defineProperty(window, INSTANCE_KEY, {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: api,
+    });
+  } catch {
+    return;
+  }
 
   const mediaProto = HTMLMediaElement.prototype;
   const nativeVolume = Object.getOwnPropertyDescriptor(mediaProto, 'volume');
@@ -75,7 +106,13 @@
     }, 8000);
   }
 
-  const volume = Number(cached && cached.volume);
+  // Отсутствие кэша — это именно «удерживать нечего», а не нулевая
+  // громкость. Проверять `Number(cached && cached.volume)` нельзя:
+  // при отсутствующем кэше выражение даёт Number(null) === 0, и на первой
+  // же загрузке нового профиля preload удерживал бы полную тишину до
+  // прихода main.js.
+  const volume =
+    cached && typeof cached === 'object' ? Number(cached.volume) : NaN;
   if (!Number.isFinite(volume) || volume < 0 || volume > 1) return;
   const enabled = !cached || cached.enabled !== false;
   const cachedGamma = Number(cached && cached.gamma);
@@ -92,6 +129,98 @@
   const shouldMute = cached && cached.muted === true;
   const logicalVolume = new WeakMap();
   let active = true;
+
+  const closest = (target, selector) =>
+    target && typeof target.closest === 'function'
+      ? target.closest(selector)
+      : null;
+  const activeReel = () =>
+    document.querySelector('ytd-reel-video-renderer[is-active]') ||
+    document.querySelector(
+      '#reel-overlay-container ytd-reel-video-renderer'
+    ) ||
+    document.querySelector('ytd-reel-video-renderer');
+  const nativeVolumeControl = (target) => {
+    const classic = closest(target, '.ytp-volume-area, .ytp-volume-panel');
+    if (classic) return classic;
+    const shorts = closest(target, 'volume-controls, .ytdVolumeControlsHost');
+    if (!shorts) return null;
+    const reel = closest(shorts, 'ytd-reel-video-renderer');
+    const active = activeReel();
+    if (active) return reel === active ? shorts : null;
+    return reel && !reel.hidden ? shorts : null;
+  };
+  const activeVideo = () => {
+    const reel = activeReel();
+    return (
+      (reel && reel.querySelector('video')) ||
+      document.querySelector('#movie_player video') ||
+      document.querySelector('video')
+    );
+  };
+  const mediaSource = (media) =>
+    media ? String(media.currentSrc || media.src || '') : '';
+
+  // То же, что видит пользователь: положение штатного ползунка Shorts или
+  // проценты на панели обычного плеера. Читать video.volume для сверки
+  // бессмысленно — именно его и подменяют.
+  const nativePercentFromDom = () => {
+    const reel = activeReel();
+    const sliders =
+      reel && typeof reel.querySelectorAll === 'function'
+        ? reel.querySelectorAll('volume-controls input#volume-input')
+        : null;
+    if (sliders && sliders.length === 1) {
+      const pct = Number(sliders[0].value);
+      if (Number.isFinite(pct) && pct >= 0 && pct <= 100) return pct;
+    }
+    const panel = document.querySelector('.ytp-volume-panel[aria-valuenow]');
+    if (panel) {
+      const pct = Number(panel.getAttribute('aria-valuenow'));
+      if (Number.isFinite(pct) && pct >= 0 && pct <= 100) return pct;
+    }
+    return null;
+  };
+  const corroborated = (requested) => {
+    const pct = nativePercentFromDom();
+    return pct != null && Math.abs(requested - pct / 100) <= DOM_TOLERANCE;
+  };
+
+  const grantVolumeIntent = (duration = INTENT_WINDOW_MS, expected) => {
+    volumeIntentVideo = activeVideo();
+    volumeIntentSource = mediaSource(volumeIntentVideo);
+    volumeIntentUntil = Date.now() + duration;
+    volumeIntentBudget = 1;
+    expectedVolume = expected;
+  };
+  // Возвращает, насколько значению можно верить: '' — не верим вовсе,
+  // 'hold' — применяем к сессии, но в сохранение не пускаем, 'trusted' —
+  // подтверждено самим контролом и годится для записи.
+  const consumeVolumeIntent = (media, requested) => {
+    if (Date.now() > volumeIntentUntil || volumeIntentBudget < 1) return '';
+    if (volumeIntentVideo && media !== volumeIntentVideo) return '';
+    const source = mediaSource(media);
+    if (
+      volumeIntentSource &&
+      source &&
+      volumeIntentSource !== source
+    ) {
+      return '';
+    }
+    if (expectedVolume !== undefined) {
+      if (Math.abs(requested - expectedVolume) > 1e-6) return '';
+      volumeIntentBudget = 0;
+      expectedVolume = undefined;
+      return 'trusted';
+    }
+    // Для стрелок, колеса и протяжки штатной панели результат жеста заранее
+    // неизвестен — шаг задаёт YouTube. Раньше окно в этом случае принимало
+    // любое значение, и скрипт страницы, попавший в чужой жест, диктовал
+    // сохранённый уровень. Теперь неподтверждённое значение живёт только в
+    // текущей сессии и до записи в хранилище не доходит.
+    volumeIntentBudget = 0;
+    return corroborated(requested) ? 'trusted' : 'hold';
+  };
 
   const outputVolume = () =>
     enabled ? Math.pow(heldVolume, gamma) : heldVolume;
@@ -118,9 +247,10 @@
     // Автоматические записи YouTube пока удерживаем на сохранённом уровне.
     // Доверенный жест над штатным контролом заранее открывает короткое
     // окно, чтобы он работал даже во время холодного запуска service worker.
-    if (consumeVolumeIntent(this, requested)) {
+    const verdict = consumeVolumeIntent(this, requested);
+    if (verdict) {
       heldVolume = requested;
-      volumeDirty = true;
+      if (verdict === 'trusted') volumeDirty = true;
     }
     logicalVolume.set(this, requested);
     applyCachedOutput(this);
@@ -143,60 +273,6 @@
   };
   mediaProto.play = earlyPlay;
 
-  const closest = (target, selector) =>
-    target && typeof target.closest === 'function'
-      ? target.closest(selector)
-      : null;
-  const activeReel = () =>
-    document.querySelector('ytd-reel-video-renderer[is-active]') ||
-    document.querySelector(
-      '#reel-overlay-container ytd-reel-video-renderer'
-    ) ||
-    document.querySelector('ytd-reel-video-renderer');
-  const nativeVolumeControl = (target) => {
-    const classic = closest(target, '.ytp-volume-area, .ytp-volume-panel');
-    if (classic) return classic;
-    const shorts = closest(target, 'volume-controls, .ytdVolumeControlsHost');
-    if (!shorts) return null;
-    const reel = closest(shorts, 'ytd-reel-video-renderer');
-    const active = activeReel();
-    if (active) return reel === active ? shorts : null;
-    return reel && !reel.hidden ? shorts : null;
-  };
-  const activeVideo = () =>
-    (activeReel() && activeReel().querySelector('video')) ||
-    document.querySelector('#movie_player video') ||
-    document.querySelector('video');
-  const mediaSource = (media) =>
-    media ? String(media.currentSrc || media.src || '') : '';
-  const grantVolumeIntent = (duration = 5000, expected) => {
-    volumeIntentVideo = activeVideo();
-    volumeIntentSource = mediaSource(volumeIntentVideo);
-    volumeIntentUntil = Date.now() + duration;
-    volumeIntentBudget = 1;
-    expectedVolume = expected;
-  };
-  const consumeVolumeIntent = (media, requested) => {
-    if (Date.now() > volumeIntentUntil || volumeIntentBudget < 1) return false;
-    if (volumeIntentVideo && media !== volumeIntentVideo) return false;
-    const source = mediaSource(media);
-    if (
-      volumeIntentSource &&
-      source &&
-      volumeIntentSource !== source
-    ) {
-      return false;
-    }
-    if (
-      expectedVolume !== undefined &&
-      Math.abs(requested - expectedVolume) > 1e-6
-    ) {
-      return false;
-    }
-    volumeIntentBudget = 0;
-    expectedVolume = undefined;
-    return true;
-  };
   const onPointerDown = (event) => {
     if (event.isTrusted && nativeVolumeControl(event.target)) {
       grantVolumeIntent();
@@ -232,7 +308,7 @@
     if (!event.isTrusted || !nativeVolumeControl(event.target)) return;
     const pct = Number(event.target && event.target.value);
     if (!Number.isFinite(pct) || pct < 0 || pct > 100) return;
-    grantVolumeIntent(5000, pct / 100);
+    grantVolumeIntent(INTENT_WINDOW_MS, pct / 100);
     heldVolume = pct / 100;
     volumeDirty = true;
     document.querySelectorAll('video, audio').forEach(applyCachedOutput);
@@ -261,41 +337,39 @@
   });
   observer.observe(document, { childList: true, subtree: true });
 
-  const api = Object.freeze({
-    version: 1,
-    takeover() {
-      if (!active) return false;
-      active = false;
-      observer.disconnect();
-      for (const type of ['loadstart', 'loadedmetadata', 'play']) {
-        document.removeEventListener(type, onMediaReady, true);
-      }
-      window.removeEventListener('pointerdown', onPointerDown, true);
-      window.removeEventListener('pointermove', onPointerMove, true);
-      window.removeEventListener('wheel', onWheel, true);
-      window.removeEventListener('keydown', onKeyDown, true);
-      window.removeEventListener('input', onNativeInput, true);
-      const currentVolume = Object.getOwnPropertyDescriptor(mediaProto, 'volume');
-      if (
-        currentVolume &&
-        currentVolume.get === earlyVolumeGet &&
-        currentVolume.set === earlyVolumeSet
-      ) {
-        Object.defineProperty(mediaProto, 'volume', nativeVolume);
-      }
-      if (mediaProto.play === earlyPlay) mediaProto.play = nativePlay;
-      return { volume: heldVolume, volumeDirty };
-    },
-  });
+  // Если service worker не проснулся, main.js не придёт вовсе, а наблюдатель
+  // за всем деревом и подменённый play() остались бы до конца вкладки. На
+  // обороте DOM у YouTube это заметная постоянная нагрузка, поэтому тяжёлую
+  // часть снимаем сами; удержание уровня остаётся на дешёвых слушателях.
+  let releaseTimer = setTimeout(() => {
+    releaseTimer = 0;
+    if (!active) return;
+    observer.disconnect();
+    if (mediaProto.play === earlyPlay) mediaProto.play = nativePlay;
+  }, 15000);
 
-  try {
-    Object.defineProperty(window, INSTANCE_KEY, {
-      configurable: false,
-      enumerable: false,
-      writable: false,
-      value: api,
-    });
-  } catch {
-    api.takeover();
-  }
+  takeoverImpl = () => {
+    if (!active) return false;
+    active = false;
+    clearTimeout(releaseTimer);
+    observer.disconnect();
+    for (const type of ['loadstart', 'loadedmetadata', 'play']) {
+      document.removeEventListener(type, onMediaReady, true);
+    }
+    window.removeEventListener('pointerdown', onPointerDown, true);
+    window.removeEventListener('pointermove', onPointerMove, true);
+    window.removeEventListener('wheel', onWheel, true);
+    window.removeEventListener('keydown', onKeyDown, true);
+    window.removeEventListener('input', onNativeInput, true);
+    const currentVolume = Object.getOwnPropertyDescriptor(mediaProto, 'volume');
+    if (
+      currentVolume &&
+      currentVolume.get === earlyVolumeGet &&
+      currentVolume.set === earlyVolumeSet
+    ) {
+      Object.defineProperty(mediaProto, 'volume', nativeVolume);
+    }
+    if (mediaProto.play === earlyPlay) mediaProto.play = nativePlay;
+    return { volume: heldVolume, volumeDirty };
+  };
 })();

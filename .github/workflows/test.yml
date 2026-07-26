@@ -27,6 +27,7 @@ jobs:
           node --check bridge.js
           node --check main.js
           node --check popup.js
+          node --check preload.js
 
       - name: Run regression tests
         run: node --test tests/*.test.cjs

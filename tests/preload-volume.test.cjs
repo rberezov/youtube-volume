@@ -125,6 +125,7 @@ const nativeVolume = Object.getOwnPropertyDescriptor(
   'volume'
 );
 const nativePlay = HTMLMediaElementMock.prototype.play;
+const timers = [];
 const context = vm.createContext({
   console,
   document,
@@ -133,9 +134,10 @@ const context = vm.createContext({
   localStorage,
   MutationObserver: MutationObserverMock,
   Promise,
+  clearTimeout() {},
   setTimeout(callback, delay) {
-    assert.equal(delay, 8000);
-    return 1;
+    timers.push({ callback, delay });
+    return timers.length;
   },
   Symbol,
   window,
@@ -186,12 +188,20 @@ assert.ok(
   Math.abs(video._volume - Math.pow(0.7, 3)) < 1e-9,
   'trusted native control input must change output while preload is active'
 );
-
 const api = window[Symbol.for('ytev.preload.instance.v1')];
 assert.equal(api.version, 1);
 const takeoverState = api.takeover();
 assert.equal(takeoverState.volume, 0.7);
-assert.equal(takeoverState.volumeDirty, true);
+// Жест открыл окно, но само значение им не подтверждено: штатный контрол
+// показывает другое (в этих моках его вообще не видно). Уровень применяется
+// к текущей сессии и НЕ уходит в сохранение — иначе скрипт страницы,
+// попавший в чужой жест, диктовал бы сохранённый уровень. Ровно эту дыру
+// до того закрыли в bridge.js, и preload не должен открывать её заново.
+assert.equal(
+  takeoverState.volumeDirty,
+  false,
+  'a value the native control does not corroborate must not reach storage'
+);
 assert.equal(observer.connected, false);
 assert.equal(
   Object.getOwnPropertyDescriptor(HTMLMediaElementMock.prototype, 'volume').get,
