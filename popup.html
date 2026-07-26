@@ -1,83 +1,123 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <style>
-    body {
-      width: 280px;
-      margin: 0;
-      padding: 14px 16px;
-      font-family: Roboto, Arial, sans-serif;
-      font-size: 13px;
-      background: #1f1f1f;
-      color: #eee;
-    }
-    h1 {
-      font-size: 14px;
-      margin: 0 0 12px;
-      font-weight: 500;
-    }
-    .row { margin-bottom: 14px; }
-    .row:last-child { margin-bottom: 0; }
-    label { display: block; margin-bottom: 6px; }
-    .value { color: #f55; font-weight: 500; }
-    input[type="range"] { width: 100%; accent-color: #f00; }
-    input[type="checkbox"] { accent-color: #f00; vertical-align: middle; margin-right: 6px; }
-    .hint { color: #999; font-size: 11px; margin-top: 4px; }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Точная громкость YouTube</title>
+  <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <h1>YouTube Exponential Volume</h1>
+  <header class="header">
+    <img class="app-icon" src="icons/icon-48.png" alt="">
+    <div class="header-copy">
+      <h1>Точная громкость</h1>
+      <p>YouTube Exponential Volume</p>
+    </div>
+  </header>
 
-  <div class="row">
-    <label>
-      <input type="checkbox" id="enabled">
-      Экспоненциальная громкость
-    </label>
-    <div class="hint">Выкл. — стандартная линейная шкала YouTube.</div>
-  </div>
+  <main>
+    <section class="card master-card" aria-labelledby="enabledTitle">
+      <label class="switch-row switch-row--master" for="enabled">
+        <span class="switch-copy">
+          <span class="switch-title" id="enabledTitle">Экспоненциальная громкость</span>
+          <span class="switch-description">Точная регулировка на низкой громкости</span>
+        </span>
+        <span class="switch">
+          <input type="checkbox" id="enabled">
+          <span class="switch-track" aria-hidden="true"></span>
+        </span>
+      </label>
+    </section>
 
-  <div class="row">
-    <label>Крутизна кривой (γ): <span class="value" id="gammaValue"></span></label>
-    <input type="range" id="gamma" min="1" max="6" step="0.1">
-    <div class="hint">Громкость на выходе = позиция^γ. 1 — линейно, 3 — рекомендуется, больше — точнее внизу шкалы.</div>
-  </div>
+    <section class="card" aria-labelledby="curveTitle">
+      <div class="section-heading">
+        <div>
+          <h2 id="curveTitle">Точность тихого звука</h2>
+        </div>
+        <output class="value-badge" id="gammaValue" for="gamma"></output>
+      </div>
+      <label class="sr-only" for="gamma">Точность регулировки тихого звука</label>
+      <input class="range" type="range" id="gamma" min="1" max="6" step="0.1">
+      <div class="range-labels" aria-hidden="true">
+        <span>Как в YouTube</span>
+        <span>Оптимально: 3</span>
+        <span>Больше точности</span>
+      </div>
+      <p class="curve-example" id="curveExample"></p>
+    </section>
 
-  <div class="row own-only">
-    <label>Длина ползунка: <span class="value" id="scaleValue"></span>% ширины плеера</label>
-    <input type="range" id="sliderScale" min="2" max="70" step="1">
-    <div class="hint">Масштабируется вместе с плеером и сжимается, если в панели не хватает места. Шаг ползунка — 0.1%. Колесо мыши: ±1%, с Shift: ±0.1%.</div>
-  </div>
+    <section class="card own-only" aria-labelledby="sizeTitle">
+      <div class="section-heading section-heading--compact">
+        <div>
+          <h2 id="sizeTitle">Размер ползунка</h2>
+          <p>Отдельно для обычных видео и Shorts.</p>
+        </div>
+      </div>
 
-  <div class="row own-only">
-    <label>Длина в Shorts: <span class="value" id="shortsValue"></span>% ширины плеера</label>
-    <input type="range" id="shortsScale" min="2" max="70" step="1">
-    <div class="hint">Отдельный размер: плеер Shorts узкий, и доля от его ширины нужна своя.</div>
-  </div>
+      <div class="range-grid">
+        <div class="range-setting">
+          <div class="range-setting__heading">
+            <label for="sliderScale">Обычное видео</label>
+            <output class="value-badge value-badge--small" id="scaleValue" for="sliderScale"></output>
+          </div>
+          <input class="range" type="range" id="sliderScale" min="2" max="70" step="1">
+        </div>
 
-  <div class="row">
-    <label>
-      <input type="checkbox" id="useNativeSlider">
-      Оставить штатную шкалу YouTube
-    </label>
-    <div class="hint">Своя шкала не строится, регулировка — обычная, но экспоненциальная кривая продолжает работать.</div>
-  </div>
+        <div class="range-setting">
+          <div class="range-setting__heading">
+            <label for="shortsScale">Shorts</label>
+            <output class="value-badge value-badge--small" id="shortsValue" for="shortsScale"></output>
+          </div>
+          <input class="range" type="range" id="shortsScale" min="2" max="70" step="1">
+        </div>
+      </div>
+    </section>
 
-  <div class="row own-only">
-    <label>
-      <input type="checkbox" id="showPercent">
-      Показывать проценты
-    </label>
-    <div class="hint">Без подписи рамка компактнее; точное значение остаётся в подсказке при наведении.</div>
-  </div>
+    <section class="card" aria-labelledby="behaviorTitle">
+      <h2 id="behaviorTitle">Поведение</h2>
 
-  <div class="row own-only">
-    <label>
-      <input type="checkbox" id="autoCollapse">
-      Сворачивать шкалу без курсора
-    </label>
-    <div class="hint">Когда мышка не на шкале, остаётся только кнопка звука; при наведении шкала плавно разворачивается.</div>
-  </div>
+      <label class="switch-row own-only" for="showPercent">
+        <span class="switch-copy">
+          <span class="switch-title">Показывать проценты</span>
+          <span class="switch-description">Точное значение рядом со шкалой</span>
+        </span>
+        <span class="switch">
+          <input type="checkbox" id="showPercent">
+          <span class="switch-track" aria-hidden="true"></span>
+        </span>
+      </label>
+
+      <label class="switch-row own-only" for="autoCollapse">
+        <span class="switch-copy">
+          <span class="switch-title">Сворачивать автоматически</span>
+          <span class="switch-description">Компактный вид без курсора</span>
+        </span>
+        <span class="switch">
+          <input type="checkbox" id="autoCollapse">
+          <span class="switch-track" aria-hidden="true"></span>
+        </span>
+      </label>
+
+      <label class="switch-row" for="useNativeSlider">
+        <span class="switch-copy">
+          <span class="switch-title">Использовать шкалу YouTube</span>
+          <span class="switch-description">Скрыть ползунок расширения</span>
+        </span>
+        <span class="switch">
+          <input type="checkbox" id="useNativeSlider">
+          <span class="switch-track" aria-hidden="true"></span>
+        </span>
+      </label>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span class="save-status" id="saveStatus" role="status" aria-live="polite">
+      <span class="save-dot" aria-hidden="true"></span>
+      <span id="saveStatusText">Сохранено</span>
+    </span>
+    <button class="reset-button" id="resetSettings" type="button">Сбросить</button>
+  </footer>
 
   <script src="popup.js"></script>
 </body>

@@ -6,11 +6,23 @@ const vm = require('node:vm');
 
 function element() {
   const listeners = new Map();
+  const classes = new Set();
   return {
     checked: false,
     value: '',
+    min: '1',
+    max: '100',
     textContent: '',
     listeners,
+    style: {
+      setProperty() {},
+    },
+    classList: {
+      toggle(name, enabled) {
+        if (enabled) classes.add(name);
+        else classes.delete(name);
+      },
+    },
     addEventListener(type, listener) {
       listeners.set(type, listener);
     },
@@ -21,6 +33,7 @@ const ids = [
   'enabled',
   'gamma',
   'gammaValue',
+  'curveExample',
   'sliderScale',
   'scaleValue',
   'shortsScale',
@@ -28,8 +41,17 @@ const ids = [
   'useNativeSlider',
   'showPercent',
   'autoCollapse',
+  'saveStatus',
+  'saveStatusText',
+  'resetSettings',
 ];
 const elements = new Map(ids.map((id) => [id, element()]));
+elements.get('gamma').min = '1';
+elements.get('gamma').max = '6';
+elements.get('sliderScale').min = '2';
+elements.get('sliderScale').max = '70';
+elements.get('shortsScale').min = '2';
+elements.get('shortsScale').max = '70';
 const windowListeners = new Map();
 const writes = [];
 
@@ -74,6 +96,15 @@ const context = vm.createContext({
 const source = fs.readFileSync(require.resolve('../popup.js'), 'utf8');
 vm.runInContext(source, context, { filename: 'popup.js' });
 
+assert.equal(elements.get('gamma').value, 3);
+assert.equal(
+  elements.get('curveExample').textContent,
+  'При положении 50% звук будет ≈ 13% от максимума.',
+);
+assert.equal(elements.get('sliderScale').value, 7);
+assert.equal(elements.get('shortsScale').value, 11);
+assert.equal(elements.get('autoCollapse').checked, true);
+
 const gamma = elements.get('gamma');
 gamma.value = '4.2';
 gamma.listeners.get('input')();
@@ -88,5 +119,12 @@ scale.listeners.get('input')();
 windowListeners.get('pagehide')();
 assert.equal(writes.length, 2, 'pagehide should flush a pending write');
 assert.equal(writes[1].sliderScale, 33);
+
+elements.get('resetSettings').listeners.get('click')();
+assert.equal(writes.length, 3, 'reset should persist immediately');
+assert.equal(writes[2].gamma, 3);
+assert.equal(writes[2].sliderScale, 7);
+assert.equal(writes[2].shortsScale, 11);
+assert.equal(writes[2].autoCollapse, true);
 
 console.log('popup storage flush test passed');

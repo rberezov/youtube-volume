@@ -7,10 +7,10 @@ const SECRET_PATTERN = /^[a-f0-9]{64}$/;
 const DEFAULTS = {
   enabled: true,
   gamma: 3,
-  sliderScale: 20,
-  shortsScale: 50,
+  sliderScale: 7,
+  shortsScale: 11,
   showPercent: true,
-  autoCollapse: false,
+  autoCollapse: true,
   useNativeSlider: false,
 };
 
