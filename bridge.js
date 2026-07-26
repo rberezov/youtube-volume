@@ -41,6 +41,11 @@
   }
 
   function grantMutedIntent(duration = INTENT_WINDOW_MS, expected) {
+    if (typeof expected !== 'boolean') {
+      mutedIntentBudget = 0;
+      expectedMuted = undefined;
+      return;
+    }
     mutedIntentUntil = Date.now() + duration;
     mutedIntentBudget = 1;
     expectedMuted = expected;
@@ -75,7 +80,7 @@
 
   function consumeMutedIntent(value) {
     if (Date.now() > mutedIntentUntil || mutedIntentBudget < 1) return false;
-    if (expectedMuted !== undefined && value !== expectedMuted) return false;
+    if (typeof expectedMuted !== 'boolean' || value !== expectedMuted) return false;
     mutedIntentBudget -= 1;
     expectedMuted = undefined;
     return true;
@@ -120,20 +125,35 @@
   // включённом Web Audio держится на максимуме — уровень задаёт усилитель.
   // Зато видно то же, что и пользователю: положение нашего ползунка либо
   // проценты на штатной панели YouTube.
-  function logicalPercentFromDom() {
+  function extensionSliderFromDom() {
     if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') {
       return null;
     }
     const sliders = document.querySelectorAll('.ytev-slider');
     // Больше одного — на странице подделка: свой ползунок ровно один.
     // Тогда честного источника нет и записи не будет.
-    if (sliders.length > 1) return null;
-    if (sliders.length === 1) {
-      const slider = sliders[0];
+    if (sliders.length !== 1) return null;
+    const slider = sliders[0];
+    return closest(slider, '.ytev-box') ? slider : null;
+  }
+
+  function logicalPercentFromDom() {
+    if (typeof document === 'undefined') return null;
+    const slider = extensionSliderFromDom();
+    if (slider) {
       const pct = Number(slider.value);
-      if (closest(slider, '.ytev-box') && Number.isFinite(pct) && pct >= 0 && pct <= 100) {
+      if (Number.isFinite(pct) && pct >= 0 && pct <= 100) {
         return { pct, tolerance: EXACT_TOLERANCE };
       }
+      return null;
+    }
+    // Если элементы с нашим классом есть, но источник неоднозначен или
+    // лежит вне нашего блока, к штатной панели не откатываемся: это
+    // выглядит как подмена DOM со стороны страницы.
+    if (
+      typeof document.querySelectorAll === 'function' &&
+      document.querySelectorAll('.ytev-slider').length
+    ) {
       return null;
     }
     const panel = document.querySelector('.ytp-volume-panel[aria-valuenow]');
@@ -232,9 +252,9 @@
   window.addEventListener(
     'input',
     (e) => {
-      if (e.isTrusted && matches(e.target, '.ytev-slider')) {
-        grantSliderValue(e.target);
-      }
+      if (!e.isTrusted || !matches(e.target, '.ytev-slider')) return;
+      const slider = extensionSliderFromDom();
+      if (slider && e.target === slider) grantSliderValue(slider);
     },
     true
   );

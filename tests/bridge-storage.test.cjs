@@ -22,7 +22,7 @@ const activeVideo = {
 // Что изолированный мир видит в DOM: собственный ползунок расширения и/или
 // штатная панель YouTube с процентами. Именно отсюда bridge берёт значение,
 // которым подтверждает запись после стрелок, колеса и штатных контролов.
-const page = { sliders: [], ariaVolume: 42 };
+const page = { sliders: [], ariaVolume: 42, video: activeVideo };
 const volumePanel = {
   getAttribute(name) {
     return name === 'aria-valuenow' ? String(page.ariaVolume) : null;
@@ -34,7 +34,7 @@ const documentMock = {
     if (selector.includes('ytp-volume-panel')) {
       return page.ariaVolume == null ? null : volumePanel;
     }
-    return selector.includes('video') ? activeVideo : null;
+    return selector.includes('video') ? page.video : null;
   },
   querySelectorAll(selector) {
     return selector === '.ytev-slider' ? page.sliders : [];
@@ -209,6 +209,7 @@ const ownSlider = {
     return selector.includes('.ytev-slider') || selector === '.ytev-box' ? this : null;
   },
 };
+page.sliders = [ownSlider];
 listeners.get('input')({
   isTrusted: true,
   target: ownSlider,
@@ -241,6 +242,33 @@ onMessage({
 assert.equal(saved.length, 4, 'one slider input must authorize mute and volume saves');
 assert.equal(saved[2].savedMuted, false);
 assert.equal(saved[3].savedVolume, 0.55);
+page.sliders = [];
+
+// Настоящий input недостаточен сам по себе: страница может подложить range
+// с тем же классом. Bridge принимает событие только от единственного
+// ползунка внутри блока расширения.
+const decoySlider = {
+  tagName: 'INPUT',
+  value: '100',
+  matches(selector) {
+    return selector === '.ytev-slider';
+  },
+  closest() {
+    return null;
+  },
+};
+page.sliders = [ownSlider, decoySlider];
+listeners.get('input')({
+  isTrusted: true,
+  target: decoySlider,
+});
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_VOLUME', channel, volume: 1 },
+});
+assert.equal(saved.length, 4, 'a trusted input from a decoy slider must be ignored');
+page.sliders = [];
 
 now += 300;
 onKeyDown({
@@ -306,6 +334,28 @@ onMessage({
 });
 assert.equal(saved.length, 6);
 
+// Если активного видео нет, результат mute-жеста нельзя предсказать.
+// Такое окно не должно разрешать странице записать произвольный boolean.
+now += 300;
+page.video = null;
+onKeyDown({
+  isTrusted: true,
+  defaultPrevented: false,
+  ctrlKey: false,
+  metaKey: false,
+  altKey: false,
+  repeat: false,
+  key: 'm',
+  target: { tagName: 'DIV' },
+});
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_SAVE_MUTED', channel, muted: false },
+});
+assert.equal(saved.length, 6, 'mute without an expected boolean must not be written');
+page.video = activeVideo;
+
 onMessage({
   source: windowMock,
   origin: 'https://www.youtube.com',
@@ -366,8 +416,7 @@ assert.equal(saved.length, 7, 'without a corroborating control nothing is writte
 // странице, и доверять положению «ползунка» больше нельзя.
 now += 300;
 page.ariaVolume = 60;
-const decoy = { tagName: 'INPUT', value: '100', closest: () => null };
-page.sliders = [ownSlider, decoy];
+page.sliders = [ownSlider, decoySlider];
 onKeyDown(arrowOverPlayer);
 onMessage({
   source: windowMock,
