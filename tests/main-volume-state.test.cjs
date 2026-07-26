@@ -106,6 +106,7 @@ const windowListeners = new Map();
 const documentListeners = new Map();
 const intervals = [];
 const storage = new Map();
+const rootClasses = new Set();
 let nativeShortsSlider = null;
 const activeReel = {
   querySelectorAll(selector) {
@@ -163,6 +164,18 @@ const windowMock = {
 const documentMock = {
   hidden: true,
   documentElement: {
+    classList: {
+      add(value) {
+        rootClasses.add(value);
+      },
+      remove(...values) {
+        for (const value of values) rootClasses.delete(value);
+      },
+      toggle(value, force) {
+        if (force) rootClasses.add(value);
+        else rootClasses.delete(value);
+      },
+    },
     appendChild() {},
   },
   addEventListener(type, listener) {
@@ -452,6 +465,11 @@ assert.equal(
   instance.update(secret, { settings: { useNativeSlider: false } }),
   true,
   'switching to the extension slider must be accepted'
+);
+assert.equal(
+  JSON.parse(storage.get('ytev-volume-state-v1')).useNativeSlider,
+  false,
+  'the custom-slider choice must be cached for the next document_start'
 );
 currentVideo = videoA;
 runMainTick();

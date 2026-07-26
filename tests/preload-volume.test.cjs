@@ -84,6 +84,27 @@ class MutationObserverMock {
 }
 
 const document = new EventTargetMock();
+const rootClasses = new Set();
+const earlyStyles = [];
+document.documentElement = {
+  classList: {
+    add(value) {
+      rootClasses.add(value);
+    },
+    remove(value) {
+      rootClasses.delete(value);
+    },
+    contains(value) {
+      return rootClasses.has(value);
+    },
+  },
+  appendChild(node) {
+    earlyStyles.push(node);
+  },
+};
+document.createElement = () => ({ id: '', textContent: '' });
+document.getElementById = (id) =>
+  earlyStyles.find((style) => style.id === id) || null;
 document.querySelector = () => null;
 document.querySelectorAll = () => [];
 const localStorage = {
@@ -94,6 +115,7 @@ const localStorage = {
       muted: false,
       enabled: true,
       gamma: 3,
+      useNativeSlider: false,
     });
   },
 };
@@ -111,11 +133,27 @@ const context = vm.createContext({
   localStorage,
   MutationObserver: MutationObserverMock,
   Promise,
+  setTimeout(callback, delay) {
+    assert.equal(delay, 8000);
+    return 1;
+  },
   Symbol,
   window,
 });
 const source = fs.readFileSync(require.resolve('../preload.js'), 'utf8');
 vm.runInContext(source, context, { filename: 'preload.js' });
+
+assert.equal(
+  rootClasses.has('ytev-native-volume-hidden'),
+  true,
+  'cached custom-slider mode must hide native controls at document_start'
+);
+assert.equal(earlyStyles.length, 1, 'the early native-control style must be installed once');
+assert.match(
+  earlyStyles[0].textContent,
+  /ytd-reel-video-renderer volume-controls/,
+  'the early style must cover the current Shorts volume control'
+);
 
 const video = new HTMLMediaElementMock();
 video.volume = 1;

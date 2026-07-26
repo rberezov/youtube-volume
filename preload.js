@@ -5,6 +5,20 @@
 
   const INSTANCE_KEY = Symbol.for('ytev.preload.instance.v1');
   const STATE_CACHE_KEY = 'ytev-volume-state-v1';
+  const EARLY_HIDE_STYLE_ID = 'ytev-early-native-volume-style';
+  const EARLY_HIDE_CLASS = 'ytev-native-volume-hidden';
+  const EARLY_HIDE_MANAGED_CLASS = 'ytev-native-volume-managed';
+  const EARLY_HIDE_CSS = `
+    .${EARLY_HIDE_CLASS} .ytp-volume-area,
+    .${EARLY_HIDE_CLASS} .ytp-volume-panel,
+    .${EARLY_HIDE_CLASS} .ytp-mute-button,
+    .${EARLY_HIDE_CLASS} ytd-reel-video-renderer volume-controls,
+    .${EARLY_HIDE_CLASS} ytd-reel-video-renderer .ytdVolumeControlsHost,
+    .${EARLY_HIDE_CLASS} ytd-shorts-player-controls volume-controls,
+    .${EARLY_HIDE_CLASS} ytd-shorts-player-controls .ytdVolumeControlsHost {
+      visibility: hidden !important;
+    }
+  `;
   const existing = window[INSTANCE_KEY];
   if (existing && existing.version === 1) return;
 
@@ -28,6 +42,37 @@
     cached = JSON.parse(localStorage.getItem(STATE_CACHE_KEY) || 'null');
   } catch {
     return;
+  }
+
+  // На повторных загрузках режим своей шкалы уже известен синхронно из кэша.
+  // Прячем штатный контрол до построения YouTube: visibility сохраняет его
+  // размеры, поэтому основной код всё ещё может снять рамку и точку монтажа.
+  if (
+    cached &&
+    cached.useNativeSlider === false &&
+    document.documentElement &&
+    document.documentElement.classList
+  ) {
+    let earlyStyle =
+      typeof document.getElementById === 'function'
+        ? document.getElementById(EARLY_HIDE_STYLE_ID)
+        : null;
+    if (!earlyStyle && typeof document.createElement === 'function') {
+      earlyStyle = document.createElement('style');
+      earlyStyle.id = EARLY_HIDE_STYLE_ID;
+      earlyStyle.textContent = EARLY_HIDE_CSS;
+      document.documentElement.appendChild(earlyStyle);
+    }
+    document.documentElement.classList.add(EARLY_HIDE_CLASS);
+    setTimeout(() => {
+      if (
+        !document.documentElement.classList.contains(
+          EARLY_HIDE_MANAGED_CLASS
+        )
+      ) {
+        document.documentElement.classList.remove(EARLY_HIDE_CLASS);
+      }
+    }, 8000);
   }
 
   const volume = Number(cached && cached.volume);

@@ -22,6 +22,19 @@ const locationMock = {
   origin: 'https://www.youtube.com',
   pathname: '/watch',
 };
+const rootClasses = new Set();
+const earlyStyles = [];
+const rootClassList = {
+  add(value) {
+    rootClasses.add(value);
+  },
+  remove(value) {
+    rootClasses.delete(value);
+  },
+  contains(value) {
+    return rootClasses.has(value);
+  },
+};
 
 // Что изолированный мир видит в DOM: собственный ползунок расширения и/или
 // штатная панель YouTube с процентами. Именно отсюда bridge берёт значение,
@@ -48,6 +61,18 @@ const volumePanel = {
 };
 
 const documentMock = {
+  documentElement: {
+    classList: rootClassList,
+    appendChild(node) {
+      earlyStyles.push(node);
+    },
+  },
+  createElement() {
+    return { id: '', textContent: '' };
+  },
+  getElementById(id) {
+    return earlyStyles.find((style) => style.id === id) || null;
+  },
   querySelector(selector) {
     if (selector.includes('ytp-volume-panel')) {
       return page.ariaVolume == null ? null : volumePanel;
@@ -93,6 +118,11 @@ const chromeMock = {
     },
   },
   storage: {
+    sync: {
+      get(defaults, callback) {
+        callback({ ...defaults, useNativeSlider: false });
+      },
+    },
     local: {
       set(value, callback) {
         saved.push(value);
@@ -124,7 +154,8 @@ const context = vm.createContext({
   document: documentMock,
   location: locationMock,
   window: windowMock,
-  setTimeout(callback) {
+  setTimeout(callback, delay) {
+    if (delay === 8000) return 1;
     callback();
     return 1;
   },
@@ -136,6 +167,13 @@ const onMessage = listeners.get('message');
 assert.equal(typeof onMessage, 'function');
 assert.equal(runtimeMessages.length, 1);
 assert.equal(runtimeMessages[0].type, 'YTEV_INIT');
+assert.equal(
+  rootClasses.has('ytev-native-volume-hidden'),
+  true,
+  'the isolated bridge must hide native controls before the service worker responds'
+);
+assert.equal(earlyStyles.length, 1, 'the early hide style must be injected only once');
+assert.match(earlyStyles[0].textContent, /\.ytp-volume-area/);
 const channel = runtimeMessages[0].channel;
 assert.match(channel, /^[a-f0-9]{32}$/);
 assert.match(runtimeMessages[0].secret, /^[a-f0-9]{64}$/);
@@ -532,5 +570,16 @@ assert.equal(runtimeMessages[1].type, 'YTEV_UPDATE_SETTINGS');
 assert.equal(runtimeMessages[1].channel, channel);
 assert.equal(runtimeMessages[1].secret, runtimeMessages[0].secret);
 assert.equal(posted.length, 0, 'settings updates must stay outside window messaging');
+
+onStorageChanged(
+  { useNativeSlider: { oldValue: false, newValue: true } },
+  'sync'
+);
+assert.equal(
+  rootClasses.has('ytev-native-volume-hidden'),
+  false,
+  'switching to the YouTube slider must reveal native controls immediately'
+);
+assert.equal(runtimeMessages.length, 3);
 
 console.log('bridge storage smoke test passed');

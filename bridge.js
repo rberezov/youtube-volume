@@ -6,6 +6,20 @@
   const PAGE_ORIGIN = location.origin;
   const WRITE_INTERVAL_MS = 250;
   const INTENT_WINDOW_MS = 2000;
+  const EARLY_HIDE_STYLE_ID = 'ytev-early-native-volume-style';
+  const EARLY_HIDE_CLASS = 'ytev-native-volume-hidden';
+  const EARLY_HIDE_MANAGED_CLASS = 'ytev-native-volume-managed';
+  const EARLY_HIDE_CSS = `
+    .${EARLY_HIDE_CLASS} .ytp-volume-area,
+    .${EARLY_HIDE_CLASS} .ytp-volume-panel,
+    .${EARLY_HIDE_CLASS} .ytp-mute-button,
+    .${EARLY_HIDE_CLASS} ytd-reel-video-renderer volume-controls,
+    .${EARLY_HIDE_CLASS} ytd-reel-video-renderer .ytdVolumeControlsHost,
+    .${EARLY_HIDE_CLASS} ytd-shorts-player-controls volume-controls,
+    .${EARLY_HIDE_CLASS} ytd-shorts-player-controls .ytdVolumeControlsHost {
+      visibility: hidden !important;
+    }
+  `;
   const randomHex = (byteLength) =>
     Array.from(crypto.getRandomValues(new Uint8Array(byteLength)), (value) =>
       value.toString(16).padStart(2, '0')
@@ -26,6 +40,44 @@
   let pendingWrite = {};
   let writeTimer = 0;
   let lastWriteAt = 0;
+
+  // Читаем только один безопасный UI-флаг прямо из chrome.storage: для этого
+  // не нужно будить service worker. На document_start правило успевает встать
+  // до того, как YouTube создаст штатные контролы. Через 8 секунд оно само
+  // отпускается, если основной код не принял управление.
+  let earlyHideFailSafe = 0;
+  function setEarlyNativeHidden(hidden) {
+    const root = document.documentElement;
+    if (!root || !root.classList) return;
+    if (hidden) {
+      let style =
+        typeof document.getElementById === 'function'
+          ? document.getElementById(EARLY_HIDE_STYLE_ID)
+          : null;
+      if (!style && typeof document.createElement === 'function') {
+        style = document.createElement('style');
+        style.id = EARLY_HIDE_STYLE_ID;
+        style.textContent = EARLY_HIDE_CSS;
+        root.appendChild(style);
+      }
+      root.classList.add(EARLY_HIDE_CLASS);
+      clearTimeout(earlyHideFailSafe);
+      earlyHideFailSafe = setTimeout(() => {
+        if (!root.classList.contains(EARLY_HIDE_MANAGED_CLASS)) {
+          root.classList.remove(EARLY_HIDE_CLASS);
+        }
+      }, 8000);
+      return;
+    }
+    clearTimeout(earlyHideFailSafe);
+    root.classList.remove(EARLY_HIDE_CLASS);
+  }
+
+  try {
+    chrome.storage.sync.get({ useNativeSlider: false }, (settings) => {
+      setEarlyNativeHidden(settings.useNativeSlider === false);
+    });
+  } catch {}
 
   // Ползунок расширения даёт то же самое число, что уйдёт в сообщении, а
   // штатная панель YouTube показывает целые проценты — оттуда значение
@@ -480,7 +532,14 @@
 
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === 'sync') sendRuntime('YTEV_UPDATE_SETTINGS');
+      if (area !== 'sync') return;
+      if (
+        changes.useNativeSlider &&
+        typeof changes.useNativeSlider.newValue === 'boolean'
+      ) {
+        setEarlyNativeHidden(changes.useNativeSlider.newValue === false);
+      }
+      sendRuntime('YTEV_UPDATE_SETTINGS');
     });
   } catch {}
 

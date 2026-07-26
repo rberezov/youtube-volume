@@ -72,6 +72,26 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     autoCollapse: true,     // сворачивать шкалу, когда курсор не на ней
     useNativeSlider: false, // не строить свою шкалу — оставить штатную
   };
+  const EARLY_HIDE_CLASS = 'ytev-native-volume-hidden';
+  const EARLY_HIDE_MANAGED_CLASS = 'ytev-native-volume-managed';
+  let earlyHideSafetyTimer = 0;
+
+  function setEarlyNativeHidden(hidden, settled = false) {
+    const root = document.documentElement;
+    if (!root || !root.classList) return;
+    root.classList.add(EARLY_HIDE_MANAGED_CLASS);
+    root.classList.toggle(EARLY_HIDE_CLASS, hidden);
+    clearTimeout(earlyHideSafetyTimer);
+    if (hidden && !settled) {
+      // Если YouTube изменил DOM и наша шкала не смогла смонтироваться,
+      // штатное управление должно вернуться автоматически.
+      earlyHideSafetyTimer = setTimeout(() => {
+        if (!document.querySelector('.ytev-box')) {
+          root.classList.remove(EARLY_HIDE_CLASS);
+        }
+      }, 8000);
+    }
+  }
 
   function applySettings(value) {
     if (!value || typeof value !== 'object') return;
@@ -88,6 +108,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     if (Number.isFinite(shortsScale)) {
       SETTINGS.shortsScale = Math.min(70, Math.max(2, shortsScale));
     }
+    setEarlyNativeHidden(!SETTINGS.useNativeSlider);
   }
 
   /* ------------------------------------------------------------------ *
@@ -231,6 +252,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
           muted: typeof preferredMuted === 'boolean' ? preferredMuted : null,
           enabled: SETTINGS.enabled,
           gamma: SETTINGS.gamma,
+          useNativeSlider: SETTINGS.useNativeSlider,
         })
       );
     } catch {}
@@ -866,6 +888,17 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   const style = document.createElement('style');
   style.textContent = `
+    /* Раннее скрытие включается ещё на document_start. visibility оставляет
+       геометрию штатного блока доступной для точного монтажа нашей шкалы. */
+    .${EARLY_HIDE_CLASS} .ytp-volume-area,
+    .${EARLY_HIDE_CLASS} .ytp-volume-panel,
+    .${EARLY_HIDE_CLASS} .ytp-mute-button,
+    .${EARLY_HIDE_CLASS} ytd-reel-video-renderer volume-controls,
+    .${EARLY_HIDE_CLASS} ytd-reel-video-renderer .ytdVolumeControlsHost,
+    .${EARLY_HIDE_CLASS} ytd-shorts-player-controls volume-controls,
+    .${EARLY_HIDE_CLASS} ytd-shorts-player-controls .ytdVolumeControlsHost {
+      visibility: hidden !important;
+    }
     /* Штатные ползунок и кнопка звука скрываются ТОЛЬКО при классе
        ytev-active — он ставится после успешного монтирования нашего
        блока и снимается в режиме отката. Если код расширения упадёт,
@@ -898,6 +931,18 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
          pointer-events:none, а свойство наследуется. Возвращаем
          интерактивность нашему поддереву явно, иначе клик попадает в video. */
       pointer-events: auto;
+    }
+    /* Новый блок сначала получает размеры, фон, состояние иконки и состояние
+       сворачивания и только затем показывается. Иначе браузер успевает
+       отрисовать резервный фон и проиграть переход к конечному состоянию. */
+    .ytev-box.ytev-initializing {
+      visibility: hidden !important;
+    }
+    .ytev-box.ytev-initializing,
+    .ytev-box.ytev-initializing *,
+    .ytev-box.ytev-initializing::after {
+      transition: none !important;
+      animation: none !important;
     }
     /* содержимое поверх слоя подсветки */
     .ytev-box > * { position: relative; z-index: 1; }
@@ -1286,6 +1331,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // (класс ytev-active включает CSS-скрытие штатных элементов),
   // опустевшая пилюля спрятана
   function enterNormal(player) {
+    setEarlyNativeHidden(true, true);
     player.classList.add('ytev-active');
     if (ui.hiddenPill && ui.hiddenPill.isConnected) {
       ui.hiddenPill.style.display = 'none';
@@ -1296,6 +1342,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // Откат (узкий плеер): наш блок спрятан, снятие класса возвращает
   // штатные кнопку и ползунок
   function enterFallback(player) {
+    setEarlyNativeHidden(false, true);
     ui.box.style.display = 'none';
     if (ui.hiddenPill && ui.hiddenPill.isConnected) {
       ui.hiddenPill.style.display = '';
@@ -1602,6 +1649,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     if (!video || video === boundVideo) return;
     unbindVideo();
     boundVideo = video;
+    if (isShorts()) beginShortsMountWait();
     // Новый элемент — новое окно подавления autoplay-mute: в Shorts каждая
     // лента приходит со своим <video>, и именно на первых кадрах YouTube
     // успевает выставить mute до того, как мы восстановим состояние.
@@ -1698,6 +1746,29 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     observedChain.clear();
   }
 
+  const SHORTS_NATIVE_MOUNT_GRACE_MS = 700;
+  let shortsMountWaitUntil = isShorts()
+    ? Date.now() + SHORTS_NATIVE_MOUNT_GRACE_MS
+    : 0;
+  let shortsMountRetryTimer = 0;
+
+  function beginShortsMountWait() {
+    if (!isShorts()) return;
+    shortsMountWaitUntil = Date.now() + SHORTS_NATIVE_MOUNT_GRACE_MS;
+  }
+
+  function waitForShortsNativeMount() {
+    if (!isShorts()) return false;
+    const remaining = shortsMountWaitUntil - Date.now();
+    if (remaining <= 0) return false;
+    clearTimeout(shortsMountRetryTimer);
+    shortsMountRetryTimer = setTimeout(() => {
+      shortsMountRetryTimer = 0;
+      ensureUI();
+    }, Math.min(80, remaining));
+    return true;
+  }
+
   // Куда встраивать блок. На обычной странице — в строку управления
   // плеера. В Shorts своей строки управления нет (у плеера минимальная
   // обвязка, которая ещё и меняется от версии к версии), поэтому кладём
@@ -1717,6 +1788,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         shortsMountAnchor = volumeHost;
         return { host: row, before: volumeHost, overlay: false };
       }
+      // Новый Shorts сначала создаёт видео, а штатную строку кнопок добавляет
+      // несколькими кадрами позже. Не показываем на это время резервную тёмную
+      // кнопку: ранний CSS уже спрятал штатную, а короткий поиск обычно успевает
+      // найти её настоящий контейнер и сразу построить окончательный интерфейс.
+      if (waitForShortsNativeMount()) return null;
     }
     // Иначе штатная строка управления плеера. Исключение — если в Shorts
     // полоса перемотки размещена поверх строки: тогда наша шкала легла бы
@@ -1983,6 +2059,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   // Полный демонтаж: штатная громкость возвращается на место
   function teardownUI() {
+    setEarlyNativeHidden(false, true);
     stopObservingUI();
     restoreNativeVolume();
     for (const el of document.querySelectorAll('.ytev-active')) {
@@ -2004,6 +2081,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // режим «штатная шкала»: свой блок не строим, но кривая продолжает
     // работать — её применяет перехватчик громкости
     if (SETTINGS.useNativeSlider) {
+      setEarlyNativeHidden(false, true);
       if (ui) teardownUI();
       bindVideo();
       return;
@@ -2043,7 +2121,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     }
 
     const box = document.createElement('div');
-    box.className = 'ytev-box';
+    box.className = 'ytev-box ytev-initializing';
 
     // Своя кнопка звука: значок предсказуемо центрирован при любом размере
     const muteBtn = document.createElement('button');
@@ -2147,6 +2225,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     updateUI();
     layout();
     updateCollapsed(false);
+    requestAnimationFrame(() => {
+      if (box.isConnected) box.classList.remove('ytev-initializing');
+    });
   }
 
   // Во время регулировки громкость пишется ТОЛЬКО напрямую в
@@ -2217,11 +2298,18 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     bindVideo();
     ensureUI();
   }, 1000);
+  const prepareForNavigation = () => {
+    if (!SETTINGS.useNativeSlider) {
+      setEarlyNativeHidden(true);
+      beginShortsMountWait();
+    }
+  };
   const refreshAfterNavigation = () =>
     setTimeout(() => {
       bindVideo();
       ensureUI();
     }, 0);
+  on(document, 'yt-navigate-start', prepareForNavigation);
   on(document, 'yt-navigate-finish', refreshAfterNavigation);
   on(document, 'DOMContentLoaded', refreshAfterNavigation);
   on(document, 'fullscreenchange', () => setTimeout(layout, 0));
@@ -2250,6 +2338,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     clearTimeout(saveVolumeTimer);
     clearTimeout(saveMutedTimer);
     clearTimeout(persistTimer);
+    clearTimeout(earlyHideSafetyTimer);
+    clearTimeout(shortsMountRetryTimer);
     for (const off of teardown.splice(0)) {
       try {
         off();
@@ -2259,6 +2349,12 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       teardownUI();
       unbindVideo();
     } catch {}
+    if (document.documentElement && document.documentElement.classList) {
+      document.documentElement.classList.remove(
+        EARLY_HIDE_CLASS,
+        EARLY_HIDE_MANAGED_CLASS
+      );
+    }
     // Граф Web Audio необратим: элемент навсегда привязан к первому
     // MediaElementAudioSourceNode, и преемник уже не сможет его создать.
     // Поэтому не бросаем элементы с чужим усилением — переводим их на
