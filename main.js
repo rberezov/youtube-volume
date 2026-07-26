@@ -273,13 +273,24 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   let volumeIntentUntil = 0;
   let mutedIntentUntil = 0;
+  let volumeIntentVideo = null;
+  let volumeIntentSource = '';
+  const mediaSource = (video) =>
+    video ? String(video.currentSrc || video.src || '') : '';
   const markVolumeIntent = (duration = 1200) => {
+    volumeIntentVideo = getVideo();
+    volumeIntentSource = mediaSource(volumeIntentVideo);
     volumeIntentUntil = Date.now() + duration;
   };
   const markMutedIntent = (duration = 1200) => {
     mutedIntentUntil = Date.now() + duration;
   };
-  const hasVolumeIntent = () => Date.now() <= volumeIntentUntil;
+  const hasVolumeIntent = (video = getVideo()) => {
+    if (Date.now() > volumeIntentUntil) return false;
+    if (volumeIntentVideo && video !== volumeIntentVideo) return false;
+    const source = mediaSource(video);
+    return !volumeIntentSource || !source || source === volumeIntentSource;
+  };
   const hasMutedIntent = () => Date.now() <= mutedIntentUntil;
   const isEditableTarget = (target) =>
     target instanceof HTMLInputElement ||
@@ -321,7 +332,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         // (например, при прокрутке комментариев) — и тогда служебный сброс
         // громкости принимался за осознанный выбор, а запись всё равно
         // отклонялась мостом: состояние сессии расходилось с хранилищем.
-        if (insidePlayer(target)) markVolumeIntent();
+        if (!isShorts() && insidePlayer(target)) markVolumeIntent();
         return;
       }
       if (String(e.key).toLowerCase() !== 'm' || e.repeat) return;
@@ -336,8 +347,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     window,
     'wheel',
     (e) => {
-      const player = getPlayer();
-      if (player && e.target instanceof Node && player.contains(e.target)) {
+      const target = e.target instanceof Element ? e.target : null;
+      if (
+        target &&
+        target.closest('.ytp-volume-area, .ytp-volume-panel')
+      ) {
         markVolumeIntent();
       }
     },
@@ -376,6 +390,21 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const current = Number(logicalOf(video));
     if (!validVolume(current) || Math.abs(current - preferredVolume) > VOLUME_EPSILON) {
       video.volume = preferredVolume;
+      return true;
+    }
+    // YouTube can reuse the same <video> for the next Short and reset its
+    // native output to 100% without going through the patched JS setter.
+    // In that case logicalVolume still contains the preferred value, so the
+    // logical comparison above alone cannot see the reset.
+    const expectedReal = toReal(preferredVolume);
+    const node = audio.nodes.get(video);
+    const actualReal = node ? node.target : Number(nativeDesc.get.call(video));
+    const expectedOutput = video.muted ? 0 : expectedReal;
+    if (
+      !Number.isFinite(actualReal) ||
+      Math.abs(actualReal - expectedOutput) > VOLUME_EPSILON
+    ) {
+      applyReal(video, expectedReal);
       return true;
     }
     return false;
@@ -1467,12 +1496,12 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       // Осознанные стрелки, колесо и штатные контролы обновляют общий
       // уровень. Записи без недавнего пользовательского ввода считаются
       // служебным сбросом YouTube и не перетирают сохранённое значение.
-      if (hasVolumeIntent() && validVolume(value)) {
+      if (hasVolumeIntent(video) && validVolume(value)) {
         rememberVolume(value, true);
       } else {
         restorePreferredVolume(video);
       }
-      if (hasMutedIntent() || (SETTINGS.useNativeSlider && hasVolumeIntent())) {
+      if (hasMutedIntent() || (SETTINGS.useNativeSlider && hasVolumeIntent(video))) {
         rememberMuted(video.muted, true);
       } else if (
         typeof preferredMuted === 'boolean' &&

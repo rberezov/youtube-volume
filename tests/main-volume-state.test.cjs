@@ -45,6 +45,7 @@ class HTMLMediaElementMock extends HTMLElementMock {
     this.listeners = new Map();
     this.paused = true;
     this.currentTime = 0;
+    this.currentSrc = '';
     this.isConnected = true;
     this.mediaKeys = null;
   }
@@ -96,6 +97,8 @@ Object.defineProperty(HTMLMediaElementMock.prototype, 'muted', {
 
 const videoA = new HTMLMediaElementMock(0.2, false);
 const videoB = new HTMLMediaElementMock(0.9, true);
+const directVideo = new HTMLMediaElementMock(1, false);
+directVideo.mediaKeys = {};
 let currentVideo = videoA;
 let clock = 1000;
 const posted = [];
@@ -349,6 +352,35 @@ assert.equal(videoA.volume, 0.6, 'an automatic reset should restore the preferre
 currentVideo = videoB;
 runMainTick();
 assert.equal(videoB.volume, 0.6, 'a replacement video should inherit the preferred value');
+
+// A wheel over the Shorts player scrolls to the next item; it is not a
+// volume gesture. Previously it opened the same intent window as a wheel over
+// the slider, so YouTube's 100% reset was accepted as the user's preference.
+windowListeners.get('wheel')[0]({ target: videoB });
+videoB.currentSrc = 'https://example.test/next-short';
+videoB.volume = 1;
+assert.equal(
+  videoB.volume,
+  0.6,
+  'Shorts navigation by wheel must not turn an automatic 100% reset into user intent'
+);
+
+// YouTube can also reset the native output directly while reusing the same
+// element. The logical getter still returns 0.6, so restoration must compare
+// the physical output as well.
+currentVideo = directVideo;
+runMainTick();
+assert.ok(
+  Math.abs(directVideo._volume - Math.pow(0.6, 3)) < 1e-9,
+  'direct fallback should initially apply the exponential output'
+);
+directVideo._volume = 1;
+directVideo.dispatchEvent(new EventMock('volumechange'));
+assert.ok(
+  Math.abs(directVideo._volume - Math.pow(0.6, 3)) < 1e-9,
+  'a native 100% reset must be corrected even when logical volume is unchanged'
+);
+
 currentVideo = videoA;
 runMainTick();
 assert.equal(
