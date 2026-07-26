@@ -49,10 +49,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   const SETTINGS = {
     enabled: true,          // применять экспоненциальную кривую
     gamma: 3,               // крутизна кривой: real = logical^gamma (1 = линейно)
-    sliderScale: 20,        // длина ползунка в % от ширины плеера
-    shortsScale: 50,        // то же для Shorts — плеер узкий, размер свой
+    sliderScale: 7,         // длина ползунка в % от ширины плеера
+    shortsScale: 11,        // то же для Shorts — плеер узкий, размер свой
     showPercent: true,      // подпись с процентами рядом с ползунком
-    autoCollapse: false,    // сворачивать шкалу, когда курсор не на ней
+    autoCollapse: true,     // сворачивать шкалу, когда курсор не на ней
     useNativeSlider: false, // не строить свою шкалу — оставить штатную
   };
 
@@ -1086,8 +1086,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // плеер там узкий (значение по умолчанию — на случай старой записи)
   const activeScale = () =>
     isShorts()
-      ? num(SETTINGS.shortsScale) || 50
-      : num(SETTINGS.sliderScale) || 20;
+      ? num(SETTINGS.shortsScale) || 11
+      : num(SETTINGS.sliderScale) || 7;
 
   const outerWidth = (el) => {
     const s = getComputedStyle(el);

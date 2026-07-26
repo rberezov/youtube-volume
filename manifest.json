@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Exponential Volume",
-  "version": "1.13.1",
+  "version": "1.14.0",
   "description": "Экспоненциальная регулировка громкости в YouTube и удлинённый точный ползунок вместо стандартного.",
   "permissions": ["storage", "scripting"],
   "host_permissions": ["https://www.youtube.com/*"],
@@ -10,7 +10,19 @@
   },
   "action": {
     "default_title": "YouTube Exponential Volume",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
   },
   "content_scripts": [
     {
