@@ -4,6 +4,12 @@
 // насколько ролик громче своей цели. Громкие он глушит сам, тихие оставляет
 // как есть, и расширение добирает недостающее усилителем Web Audio.
 //
+// Решение принимается только по согласованному снимку: уровень из ответа
+// плеера и тип дорожки из статистики должны описывать один и тот же ролик.
+// Поэтому макет плеера здесь полнее, чем «один loudnessDb»: у него есть
+// videoDetails, streamingData.adaptiveFormats и правдоподобная строка
+// громкости — ровно те три места, откуда расширение и читает.
+//
 // Наблюдать компенсацию снаружи можно только по фактическому усилению в
 // графе, поэтому тест подменяет AudioContext и записывает всё, что уходит в
 // GainNode. Подмена живёт на стороне теста — в расширении отладочных
@@ -41,86 +47,113 @@ const TONE = wavDataUri();
 const BASE_GAIN = Math.pow(0.5, 3);
 const boostOf = (db) => Math.pow(10, db / 20);
 
+// Запись всего, что уходит в GainNode. Уезжает в страницу через evaluate,
+// поэтому ссылаться на замыкание внутри нельзя.
+function recordGains() {
+  window.__gains = [];
+  const Ctx = window.AudioContext;
+  window.AudioContext = class extends Ctx {
+    createGain() {
+      const node = super.createGain();
+      const proto = Object.getPrototypeOf(node.gain);
+      const value = Object.getOwnPropertyDescriptor(proto, 'value');
+      Object.defineProperty(node.gain, 'value', {
+        get: () => value.get.call(node.gain),
+        set: (next) => {
+          window.__gains.push(next);
+          value.set.call(node.gain, next);
+        },
+      });
+      const setTarget = node.gain.setTargetAtTime.bind(node.gain);
+      node.gain.setTargetAtTime = (next, ...rest) => {
+        window.__gains.push(next);
+        return setTarget(next, ...rest);
+      };
+      return node;
+    }
+  };
+}
+
+// Макет плеера в той форме, в какой данные приходят от настоящего YouTube.
+// spec: { id, db, offersDrc, drcNow, drcWhen, statsDb, statsSilent, responseId }
+// drcWhen — выражение строкой: спек уезжает в страницу как JSON, функции в
+// нём не переживают сериализацию.
+function installPlayer(spec, tone) {
+  window.__started = Date.now();
+  const player = document.getElementById('movie_player');
+  const drcWhen = spec.drcWhen ? new Function('return (' + spec.drcWhen + ')') : null;
+  const audio = (itag, drc) => ({
+    itag,
+    mimeType: 'audio/webm; codecs="opus"',
+    bitrate: 130000,
+    audioQuality: 'AUDIO_QUALITY_MEDIUM',
+    audioTrack: drc ? { id: 'en.4', displayName: 'English original' } : undefined,
+    isDrc: drc ? true : undefined,
+    url: 'https://rr3---sn-x.googlevideo.com/videoplayback?expire=1&sig=' + 'A'.repeat(200),
+  });
+  const formats = [audio(251, false)];
+  if (spec.offersDrc) formats.push(audio('251-drc', true));
+  player.getVideoData = () => ({ video_id: spec.id });
+  player.getPlayerResponse = () => ({
+    videoDetails: { videoId: spec.responseId || spec.id },
+    playerConfig: { audioConfig: { loudnessDb: spec.db } },
+    streamingData: { adaptiveFormats: formats },
+  });
+  player.getStatsForNerds = () => {
+    if (spec.drcNow === true || (drcWhen && drcWhen())) {
+      return { volume: 'DRC (cont.-14.0 dB / tgt.-14.0 dB)' };
+    }
+    // statsSilent — статистика ещё не отдала уровень (или отдала чужой):
+    // сверять не с чем, и снимок считается неполным.
+    if (spec.statsSilent) return { volume: '100% / 100%' };
+    const shown = spec.statsDb != null ? spec.statsDb : spec.db;
+    return { volume: `100% / 100% (content loudness ${shown.toFixed(1)}dB)` };
+  };
+  const video = document.querySelector('video');
+  video.src = tone;
+  video.loop = true;
+}
+
 run('loudness: компенсация тихих роликов', async ({ browser, reporter, errors }) => {
   const { check } = reporter;
 
-  // Возвращает последнее усиление, доехавшее до GainNode.
-  async function measure({ loudnessDb, normalize, drc = false, withReport = false }) {
+  // Поднимает страницу с макетом плеера и запущенным тоном.
+  async function play(spec, { normalize = true } = {}) {
     const page = await openPage(browser, {
       withMain: { normalizeLoudness: normalize },
       errors,
       before: async (target) => {
         await target.evaluate(
-          ([db, tone, drcActive]) => {
-            // 1. Записываем всё, что уходит в усиление.
-            window.__gains = [];
-            const Ctx = window.AudioContext;
-            window.AudioContext = class extends Ctx {
-              createGain() {
-                const node = super.createGain();
-                const proto = Object.getPrototypeOf(node.gain);
-                const value = Object.getOwnPropertyDescriptor(proto, 'value');
-                Object.defineProperty(node.gain, 'value', {
-                  get: () => value.get.call(node.gain),
-                  set: (next) => {
-                    window.__gains.push(next);
-                    value.set.call(node.gain, next);
-                  },
-                });
-                const setTarget = node.gain.setTargetAtTime.bind(node.gain);
-                node.gain.setTargetAtTime = (next, ...rest) => {
-                  window.__gains.push(next);
-                  return setTarget(next, ...rest);
-                };
-                return node;
-              }
-            };
-            // 2. Плеер отдаёт уровень ролика так же, как настоящий YouTube.
-            const player = document.getElementById('movie_player');
-            player.getPlayerResponse = () => ({
-              playerConfig: { audioConfig: { loudnessDb: db } },
-            });
-            player.getVideoData = () => ({ video_id: 'test' + db });
-            // Статистика плеера: при активной DRC-дорожке в строке
-            // громкости YouTube пишет DRC и уже сведённые cont./tgt.
-            player.getStatsForNerds = () => ({
-              volume: drcActive
-                ? 'DRC (cont.-14.0 dB / tgt.-14.0 dB)'
-                : '100% / 74% (content loudness 2.6dB)',
-            });
-            // 3. Реально играющий элемент — иначе граф не построится.
-            const video = document.querySelector('video');
-            video.src = tone;
-            video.loop = true;
+          ([install, record, s, tone]) => {
+            new Function('return ' + record)()();
+            new Function('return ' + install)()(s, tone);
           },
-          [loudnessDb, TONE, drc]
+          [installPlayer.toString(), recordGains.toString(), spec, TONE]
         );
       },
     });
-
     await page.evaluate(() => document.querySelector('video').play());
-    // граф строится на playing; усиление появляется только после окна
-    // определения типа дорожки (2с) — ждём с запасом
-    await page.waitForTimeout(3200);
-    const gains = await page.evaluate(() => window.__gains.slice());
-    const built = await page.evaluate(() => {
-      const descriptor = Object.getOwnPropertyDescriptor(
-        HTMLMediaElement.prototype,
-        'volume'
-      );
-      // при работающем графе элемент держится на максимуме
-      return descriptor.get.call(document.querySelector('video')) !== null;
-    });
-    const report = withReport
-      ? await page.evaluate(() =>
-          window[Symbol.for('ytev.main.instance.v2')].loudness()
-        )
-      : null;
-    await page.close();
-    return { last: gains.length ? gains[gains.length - 1] : null, gains, built, report };
+    return page;
   }
 
-  const quiet = await measure({ loudnessDb: -6, normalize: true });
+  const readAll = (page) =>
+    page.evaluate(() => ({
+      gains: window.__gains.slice(),
+      report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
+    }));
+
+  // Возвращает последнее усиление, доехавшее до GainNode.
+  async function measure(spec, options) {
+    const page = await play(spec, options);
+    // Решение больше не ждёт окна определения дорожки: снимок согласован уже
+    // на старте, и хватает одного секундного тика с запасом.
+    await page.waitForTimeout(1200);
+    const { gains, report } = await readAll(page);
+    await page.close();
+    return { last: gains.length ? gains[gains.length - 1] : null, gains, report };
+  }
+
+  const quiet = await measure({ id: 'quiet', db: -6 });
   check(
     'граф Web Audio построился и усиление наблюдаемо',
     quiet.last !== null,
@@ -132,21 +165,21 @@ run('loudness: компенсация тихих роликов', async ({ brows
     `${quiet.last} против ожидаемого ${BASE_GAIN * boostOf(6)}`
   );
 
-  const off = await measure({ loudnessDb: -6, normalize: false });
+  const off = await measure({ id: 'off', db: -6 }, { normalize: false });
   check(
     'с выключенной настройкой компенсации нет',
     off.last !== null && Math.abs(off.last - BASE_GAIN) < 1e-6,
     `${off.last} против ожидаемого ${BASE_GAIN}`
   );
 
-  const loud = await measure({ loudnessDb: 4, normalize: true });
+  const loud = await measure({ id: 'loud', db: 4 });
   check(
     'громкий ролик не трогаем — его YouTube приглушил сам',
     loud.last !== null && Math.abs(loud.last - BASE_GAIN) < 1e-6,
     `${loud.last} против ожидаемого ${BASE_GAIN}`
   );
 
-  const veryQuiet = await measure({ loudnessDb: -20, normalize: true });
+  const veryQuiet = await measure({ id: 'very', db: -20 });
   check(
     'усиление ограничено 6дБ даже для очень тихого',
     veryQuiet.last !== null && Math.abs(veryQuiet.last - BASE_GAIN * boostOf(6)) < 1e-6,
@@ -155,78 +188,93 @@ run('loudness: компенсация тихих роликов', async ({ brows
 
   // Диагностика должна показывать то же, что реально ушло в усилитель:
   // ею пользователь сверяет наш вывод со «Статистикой для сисадминов».
-  const reported = await measure({ loudnessDb: -6, normalize: true, withReport: true });
   check(
     'диагностика показывает прочитанный уровень',
-    reported.report && reported.report.db === -6,
-    JSON.stringify(reported.report)
+    quiet.report && quiet.report.db === -6 && quiet.report.complete === true,
+    JSON.stringify(quiet.report)
   );
   check(
     'диагностика показывает применённое усиление',
-    reported.report && Math.abs(reported.report.boostDb - 6) < 0.01,
-    JSON.stringify(reported.report)
+    quiet.report && Math.abs(quiet.report.boostDb - 6) < 0.01,
+    JSON.stringify(quiet.report)
   );
 
   // Находка полевой проверки на Cmp99FbMSqY: YouTube отдал DRC-дорожку,
   // уже сведённую к −14 LKFS, а playerConfig.audioConfig.loudnessDb остался
   // от исходной (−12.7дБ). Усиление поверх этого — двойная нормализация.
-  const drcQuiet = await measure({ loudnessDb: -12.7, normalize: true, drc: true });
+  const drcQuiet = await measure({
+    id: 'drc',
+    db: -12.7,
+    offersDrc: true,
+    drcNow: true,
+  });
   check(
     'при активной DRC-дорожке усиления нет',
     drcQuiet.last !== null && Math.abs(drcQuiet.last - BASE_GAIN) < 1e-6,
     `${drcQuiet.last} против ожидаемого ${BASE_GAIN}`
   );
-
-  const drcReport = await measure({
-    loudnessDb: -12.7,
-    normalize: true,
-    drc: true,
-    withReport: true,
-  });
   check(
     'диагностика сообщает про DRC',
-    drcReport.report && drcReport.report.drc === true && drcReport.report.boostDb === 0,
-    JSON.stringify(drcReport.report)
+    drcQuiet.report && drcQuiet.report.drc === true && drcQuiet.report.boostDb === 0,
+    JSON.stringify(drcQuiet.report)
+  );
+
+  // Второй путь к решению: статистика молчит, но в ответе плеера нет ни одной
+  // DRC-дорожки — играть ей неоткуда, и ждать нечего.
+  const byFormats = await measure({ id: 'formats', db: -6, statsSilent: true });
+  check(
+    'без DRC-дорожки в ответе решение принимается без статистики',
+    byFormats.last !== null && Math.abs(byFormats.last - BASE_GAIN * boostOf(6)) < 1e-6,
+    `${byFormats.last} при источнике «${byFormats.report && byFormats.report.source}»`
+  );
+
+  // Главная проверка: DRC-дорожка предлагается, а статистика ещё не про этот
+  // ролик (показывает чужой уровень). Снимок не согласован — усиления нет
+  // ни на миг, и это не зависит ни от какого времени.
+  const ambiguous = await measure({
+    id: 'ambiguous',
+    db: -6,
+    offersDrc: true,
+    statsSilent: true,
+  });
+  check(
+    'несогласованный снимок: усиление не поднимается',
+    ambiguous.gains.length > 0 && Math.max(...ambiguous.gains) <= BASE_GAIN + 1e-6,
+    `максимум в графе ${Math.max(...ambiguous.gains)} при базовом ${BASE_GAIN}`
+  );
+  check(
+    'несогласованный снимок: диагностика честно говорит «неизвестно»',
+    ambiguous.report && ambiguous.report.complete === false,
+    JSON.stringify(ambiguous.report)
+  );
+
+  // Ответ плеера от предыдущего ролика (так бывает сразу после перехода)
+  // решением не считается, даже если статистика подтверждает его уровень.
+  const stale = await measure({
+    id: 'current',
+    responseId: 'previous',
+    db: -6,
+  });
+  check(
+    'ответ плеера от чужого ролика не применяется',
+    stale.last !== null && Math.abs(stale.last - BASE_GAIN) < 1e-6,
+    `${stale.last} против ожидаемого ${BASE_GAIN}`
   );
 
   // «Стабильную громкость» можно включить прямо во время ролика: решение
   // должно пересчитаться, а не залипнуть на прежнем усилении.
   {
-    const page = await openPage(browser, {
-      withMain: { normalizeLoudness: true },
-      errors,
-      before: async (target) => {
-        await target.evaluate(
-          ([tone]) => {
-            window.__drc = false;
-            const player = document.getElementById('movie_player');
-            player.getPlayerResponse = () => ({
-              playerConfig: { audioConfig: { loudnessDb: -6 } },
-            });
-            player.getVideoData = () => ({ video_id: 'toggle' });
-            player.getStatsForNerds = () => ({
-              volume: window.__drc
-                ? 'DRC (cont.-14.0 dB / tgt.-14.0 dB)'
-                : '100% / 100% (content loudness -6.0dB)',
-            });
-            const video = document.querySelector('video');
-            video.src = tone;
-            video.loop = true;
-          },
-          [TONE]
-        );
-      },
+    const page = await play({
+      id: 'toggle',
+      db: -6,
+      offersDrc: true,
+      drcWhen: 'window.__drc === true',
     });
-    await page.evaluate(() => document.querySelector('video').play());
-    await page.waitForTimeout(2200);
-    const before = await page.evaluate(() =>
-      window[Symbol.for('ytev.main.instance.v2')].loudness().boostDb
-    );
+    await page.waitForTimeout(1200);
+    const before = (await readAll(page)).report.boostDb;
     await page.evaluate(() => (window.__drc = true));
     await page.waitForTimeout(1600); // решение обновляет секундный тик
-    const after = await page.evaluate(() =>
-      window[Symbol.for('ytev.main.instance.v2')].loudness().boostDb
-    );
+    const after = (await readAll(page)).report.boostDb;
     await page.close();
     check(
       'включение DRC во время ролика снимает усиление',
@@ -235,67 +283,20 @@ run('loudness: компенсация тихих роликов', async ({ brows
     );
   }
 
-  // Гонка из полевой проверки: при переходе Shorts → обычное видео
-  // loudnessDb приходит раньше, чем признак DRC. Раньше расширение успевало
-  // включить усиление на ~0.9с, пока очередной секундный опрос его не снимал.
-  // Теперь усиления не должно быть ни в один момент.
+  // Страховка от прежней гонки: при переходе Shorts → обычное видео
+  // loudnessDb приходил раньше признака DRC, и расширение успевало включить
+  // усиление на ~0.9с. Теперь признак может опоздать на сколько угодно —
+  // до него снимок несогласован, и усиления не бывает вовсе.
   {
-    const page = await openPage(browser, {
-      withMain: { normalizeLoudness: true },
-      errors,
-      before: async (target) => {
-        await target.evaluate(
-          ([tone]) => {
-            window.__gains = [];
-            const Ctx = window.AudioContext;
-            window.AudioContext = class extends Ctx {
-              createGain() {
-                const node = super.createGain();
-                const proto = Object.getPrototypeOf(node.gain);
-                const value = Object.getOwnPropertyDescriptor(proto, 'value');
-                Object.defineProperty(node.gain, 'value', {
-                  get: () => value.get.call(node.gain),
-                  set: (next) => {
-                    window.__gains.push(next);
-                    value.set.call(node.gain, next);
-                  },
-                });
-                const setTarget = node.gain.setTargetAtTime.bind(node.gain);
-                node.gain.setTargetAtTime = (next, ...rest) => {
-                  window.__gains.push(next);
-                  return setTarget(next, ...rest);
-                };
-                return node;
-              }
-            };
-            const started = Date.now();
-            const player = document.getElementById('movie_player');
-            // loudnessDb доступен сразу...
-            player.getPlayerResponse = () => ({
-              playerConfig: { audioConfig: { loudnessDb: -1.57 } },
-            });
-            player.getVideoData = () => ({ video_id: 'race' });
-            // ...а признак DRC появляется на 600мс позже, как в замере.
-            player.getStatsForNerds = () => ({
-              volume:
-                Date.now() - started > 600
-                  ? 'DRC (cont.-14.0 dB / tgt.-14.0 dB)'
-                  : '100% / 100% (content loudness -1.57dB)',
-            });
-            const video = document.querySelector('video');
-            video.src = tone;
-            video.loop = true;
-          },
-          [TONE]
-        );
-      },
+    const page = await play({
+      id: 'race',
+      db: -1.57,
+      offersDrc: true,
+      statsSilent: true,
+      drcWhen: 'Date.now() - window.__started > 600',
     });
-    await page.evaluate(() => document.querySelector('video').play());
-    await page.waitForTimeout(3200);
-    const { gains, report } = await page.evaluate(() => ({
-      gains: window.__gains.slice(),
-      report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
-    }));
+    await page.waitForTimeout(2200);
+    const { gains, report } = await readAll(page);
     await page.close();
     const loudest = gains.length ? Math.max(...gains) : 0;
     check(
@@ -310,7 +311,7 @@ run('loudness: компенсация тихих роликов', async ({ brows
     );
   }
 
-  const missing = await measure({ loudnessDb: null, normalize: true });
+  const missing = await measure({ id: 'missing', db: null, statsSilent: true });
   check(
     'без данных о громкости усиление не меняем',
     missing.last !== null && Math.abs(missing.last - BASE_GAIN) < 1e-6,

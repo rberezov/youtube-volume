@@ -621,66 +621,97 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
    * ------------------------------------------------------------------ */
 
   const MAX_BOOST_DB = 6;
-  // Признак DRC появляется на доли секунды позже loudnessDb. Решение,
-  // принятое по одному loudnessDb, успевало поднять громкость на уже
-  // нормализованном звуке: замер на переходе Shorts → обычное видео показал
-  // усиление на 553мс, признак DRC на 616мс и снятие только на 1513мс —
-  // почти секунда лишней громкости. Поэтому после смены ролика усиления не
-  // даём вовсе, пока тип дорожки не определится, и опрашиваем в это время
-  // чаще секундного тика. Окно с запасом втрое к наблюдавшимся 0.6с.
-  const LOUDNESS_SETTLE_MS = 2000;
-  const LOUDNESS_POLL_MS = 150;
+  // События дорожки, на которых имеет смысл перечитать снимок.
+  const LOUDNESS_EVENTS = ['loadedmetadata', 'loadeddata', 'canplay', 'playing'];
   let loudnessBoost = 1;
   let loudnessKey = '';
-  let loudnessSettleUntil = 0;
-  let loudnessPollTimer = 0;
 
-  // Частый опрос живёт только внутри окна. Один опрос приходится уже после
-  // него, иначе решение ждало бы очередного секундного тика.
-  function scheduleLoudnessPoll() {
-    clearTimeout(loudnessPollTimer);
-    if (Date.now() > loudnessSettleUntil + LOUDNESS_POLL_MS) return;
-    loudnessPollTimer = setTimeout(() => {
-      loudnessPollTimer = 0;
-      refreshLoudness();
-    }, LOUDNESS_POLL_MS);
-  }
+  /* ---- Почему решение принимается только по согласованному снимку ----
+   *
+   * Новый YouTube умеет отдавать отдельную DRC-дорожку («стабильная
+   * громкость»): она уже сведена к цели −14 LKFS, а
+   * playerConfig.audioConfig.loudnessDb остаётся от исходной дорожки. Усиление
+   * по нему поверх DRC — двойная нормализация: на ролике с
+   * «DRC (cont.−14.0 dB / tgt.−14.0 dB)» расширение читало −12.7дБ и
+   * накидывало ещё +6дБ.
+   *
+   * Уровень и тип дорожки лежат в разных местах — в ответе плеера и в
+   * статистике — и готовы не одновременно. Замер на переходе Shorts → обычное
+   * видео: усиление на 553мс, признак DRC на 616мс, снятие только на 1513мс.
+   * Раньше это лечилось окном ожидания в 2 секунды, но окно — догадка о
+   * величине зазора: на медленной машине или медленном канале зазор её
+   * превысит, на быстрой мы ждём зря.
+   *
+   * Поэтому ждём не время, а факт. Решение считается известным, только если
+   * два источника описывают одну и ту же дорожку:
+   *   - в строке громкости стоит DRC — усиливать нечего, вопрос закрыт;
+   *   - либо статистика показывает ровно тот же уровень, что и ответ плеера
+   *     (в «Статистике для сисадминов» он подписан как content loudness), —
+   *     значит статистика уже про этот ролик, и DRC в ней нет;
+   *   - либо ответ плеера вовсе не предлагает DRC-дорожки — тогда играть ей
+   *     неоткуда.
+   * Во всех остальных случаях снимок неполон, и усиление не поднимается.
+   * ------------------------------------------------------------------ */
 
-  function beginLoudnessSettle() {
-    loudnessKey = '';
-    loudnessSettleUntil = Date.now() + LOUDNESS_SETTLE_MS;
-    scheduleLoudnessPoll();
-  }
+  // Ключи формата со ссылками и подписями: там встречается любое сочетание
+  // букв, и поиск «drc» по ним давал бы ложные срабатывания.
+  const FORMAT_NOISE_KEY = /url|cipher|signature|init|index|range|projection/i;
+  // Число перед «dB» в строке громкости. Минус бывает и типографский, а
+  // разделитель дробной части зависит от локали интерфейса.
+  const DB_IN_STATS = /(-|−)?(\d+(?:[.,]\d+)?)\s*dB/gi;
 
-  // Новый YouTube может отдавать отдельную DRC-дорожку («стабильная
-  // громкость»): она уже сведена к цели −14 LKFS, и её собственный
-  // loudnessDb равен нулю. А playerConfig.audioConfig.loudnessDb остаётся
-  // от исходной дорожки — по нему мы добавляли усиление поверх уже
-  // нормализованного звука. Это двойная нормализация: на ролике с
-  // «DRC (cont.−14.0 dB / tgt.−14.0 dB)» расширение читало −12.7дБ и
-  // накидывало ещё +6дБ. Признак активной DRC-дорожки — слово DRC в
-  // строке громкости из статистики плеера.
-  function drcActive(player) {
-    if (!player || typeof player.getStatsForNerds !== 'function') return false;
+  function statsVolumeText(player) {
+    if (!player || typeof player.getStatsForNerds !== 'function') return '';
     try {
       const stats = player.getStatsForNerds();
-      return /\bDRC\b/.test(String(stats && stats.volume));
+      return stats && stats.volume != null ? String(stats.volume) : '';
     } catch {
-      return false;
+      return '';
     }
   }
 
-  function readLoudnessDb(player) {
-    if (!player || typeof player.getPlayerResponse !== 'function') return null;
-    try {
-      const response = player.getPlayerResponse();
-      const config =
-        response && response.playerConfig && response.playerConfig.audioConfig;
-      const db = Number(config && config.loudnessDb);
-      return Number.isFinite(db) ? db : null;
-    } catch {
-      return null;
+  // Совпал ли уровень из статистики с уровнем из ответа плеера. Это и есть
+  // сверка: два источника сошлись — значит описывают один ролик.
+  function statsConfirms(text, db) {
+    DB_IN_STATS.lastIndex = 0;
+    for (let match; (match = DB_IN_STATS.exec(text)); ) {
+      const value = Number(String(match[2]).replace(',', '.')) * (match[1] ? -1 : 1);
+      // Статистика округляет до десятых, отсюда допуск.
+      if (Number.isFinite(value) && Math.abs(value - db) < 0.1) return true;
     }
+    return false;
+  }
+
+  // DRC-дорожка у YouTube — отдельный формат (в yt-dlp он виден как «251-drc»
+  // рядом с «251»), поэтому метка есть в самом описании формата. Ищем её
+  // широко, не завязываясь на единственное имя поля: правка должна пережить
+  // переименование.
+  function formatLooksDrc(format) {
+    if (!format || typeof format !== 'object') return false;
+    for (const key of Object.keys(format)) {
+      if (FORMAT_NOISE_KEY.test(key)) continue;
+      const value = format[key];
+      if (value == null || value === false || value === '') continue;
+      if (/drc/i.test(key)) return true;
+      let text;
+      try {
+        text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+      } catch {
+        continue;
+      }
+      // Длинные строки — это всё те же ссылки под другими именами: короткое
+      // «drc» находится в них случайно.
+      if (text.length <= 120 && /drc/i.test(text)) return true;
+    }
+    return false;
+  }
+
+  function audioFormats(response) {
+    const streaming = response && response.streamingData;
+    const list = streaming && streaming.adaptiveFormats;
+    if (!Array.isArray(list)) return null;
+    const audio = list.filter((f) => f && /^audio/i.test(String(f.mimeType || '')));
+    return audio.length ? audio : null;
   }
 
   function currentVideoId(player) {
@@ -693,49 +724,81 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     }
   }
 
-  function refreshLoudness() {
-    if (!SETTINGS.normalizeLoudness) {
-      loudnessKey = '';
-      if (loudnessBoost !== 1) {
-        loudnessBoost = 1;
-        reapplyCurve();
-      }
-      return;
-    }
-    const player = getPlayer();
-    const drc = drcActive(player);
-    const db = readLoudnessDb(player);
-
-    // Пока идёт окно определения дорожки, держим усиление на нуле. DRC
-    // распознаётся сразу, как только появляется, — на неё ждать нечего.
-    // Тише на секунду лучше, чем громче на секунду.
-    if (!drc && Date.now() < loudnessSettleUntil) {
-      if (loudnessBoost !== 1) {
-        loudnessBoost = 1;
-        reapplyCurve();
-      }
-      scheduleLoudnessPoll();
-      return;
-    }
-
-    // Ответ плеера приходит не сразу. Пока его нет, компенсацию не трогаем:
-    // скачок усиления в середине ролика слышнее, чем недобранные децибелы
-    // в первые доли секунды. При активной DRC решение известно и без него.
-    if (db === null && !drc) {
-      scheduleLoudnessPoll();
-      return;
-    }
-    // В ключ входит и признак DRC: «стабильную громкость» можно включить
-    // и выключить прямо во время ролика, и решение тогда меняется.
+  /**
+   * Полное решение из одного снимка.
+   * `complete: false` — «пока неизвестно»; в этом состоянии усиление не
+   * поднимается никогда, поэтому худший исход на медленной машине — «тише,
+   * чем могло бы», и никогда «громче, чем нужно».
+   */
+  function readLoudness(player) {
     const id = currentVideoId(player);
-    const key = `${id}|${drc ? 'drc' : 'raw'}`;
-    if (id && key === loudnessKey) return;
-    loudnessKey = key;
-    const boostDb = drc || db === null || db >= 0 ? 0 : Math.min(MAX_BOOST_DB, -db);
-    const next = Math.pow(10, boostDb / 20);
+    const stats = statsVolumeText(player);
+    const unknown = { id, db: null, drc: false, complete: false, source: '', stats };
+    if (!player || typeof player.getPlayerResponse !== 'function') return unknown;
+    let response = null;
+    try {
+      response = player.getPlayerResponse();
+    } catch {
+      return unknown;
+    }
+    if (!response) return unknown;
+    // Сразу после перехода плеер ещё какое-то время отдаёт ответ предыдущего
+    // ролика. Снимок от чужого ролика решением не считается.
+    const details = response.videoDetails;
+    const snapshotId = details && details.videoId ? String(details.videoId) : '';
+    if (id && snapshotId && snapshotId !== id) return unknown;
+    const videoId = id || snapshotId;
+    if (!videoId) return unknown;
+    unknown.id = videoId;
+
+    const config = response.playerConfig && response.playerConfig.audioConfig;
+    const raw = config ? config.loudnessDb : undefined;
+    const db = raw == null || raw === '' ? NaN : Number(raw);
+    const known = { id: videoId, db: Number.isFinite(db) ? db : null, stats };
+    // Прочитанный уровень показываем и в неполном снимке: без него
+    // диагностика не отличит «уровня ещё нет» от «нечем подтвердить».
+    unknown.db = known.db;
+
+    if (/\bDRC\b/.test(stats)) {
+      return { ...known, drc: true, complete: true, source: 'stats' };
+    }
+    if (!Number.isFinite(db)) return unknown;
+    if (statsConfirms(stats, db)) {
+      return { ...known, drc: false, complete: true, source: 'stats' };
+    }
+    const formats = audioFormats(response);
+    if (formats && !formats.some(formatLooksDrc)) {
+      return { ...known, drc: false, complete: true, source: 'formats' };
+    }
+    return unknown;
+  }
+
+  function setLoudnessBoost(next) {
     if (Math.abs(next - loudnessBoost) < 1e-6) return;
     loudnessBoost = next;
     reapplyCurve(); // через setTargetAtTime, поэтому без щелчка
+  }
+
+  // Смена ролика: прежнее решение больше не действует, а нового ещё нет.
+  function resetLoudness() {
+    loudnessKey = '';
+    setLoudnessBoost(1);
+  }
+
+  function refreshLoudness() {
+    if (!SETTINGS.normalizeLoudness) {
+      resetLoudness();
+      return;
+    }
+    const snap = readLoudness(getPlayer());
+    if (!snap.complete) return;
+    // В ключ входит и признак DRC: «стабильную громкость» можно включить
+    // и выключить прямо во время ролика, и решение тогда меняется.
+    const key = `${snap.id}|${snap.drc ? 'drc' : 'raw'}`;
+    if (key === loudnessKey) return;
+    loudnessKey = key;
+    const boostDb = snap.drc || snap.db >= 0 ? 0 : Math.min(MAX_BOOST_DB, -snap.db);
+    setLoudnessBoost(Math.pow(10, boostDb / 20));
   }
 
   // Итоговое усиление в графе. Компенсация живёт только здесь: запасной
@@ -1058,12 +1121,17 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // для сисадминов»: там то же значение подписано как content loudness.
     // Ничего закрытого не отдаёт — уровень ролика странице и так известен.
     loudness() {
-      const player = getPlayer();
+      const snap = readLoudness(getPlayer());
       return {
         enabled: SETTINGS.normalizeLoudness,
-        db: readLoudnessDb(player),
-        drc: drcActive(player),
-        settling: Date.now() < loudnessSettleUntil,
+        db: snap.db,
+        drc: snap.drc,
+        // complete — согласовались ли источники; source — кто дал ответ.
+        // Вместе со stats этого хватает, чтобы разобрать любой спорный
+        // случай прямо из консоли, не добавляя отладочных крючков.
+        complete: snap.complete,
+        source: snap.source,
+        stats: snap.stats,
         boost: loudnessBoost,
         boostDb: Number((20 * Math.log10(loudnessBoost)).toFixed(2)),
         maxBoostDb: MAX_BOOST_DB,
@@ -1832,10 +1900,12 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   function unbindVideo() {
     if (!videoBinding) return;
-    const { video, onVolumeChange, restoreAfterMediaChange } = videoBinding;
+    const { video, onVolumeChange, restoreAfterMediaChange, onMediaProgress } =
+      videoBinding;
     video.removeEventListener('volumechange', onVolumeChange);
     video.removeEventListener('loadedmetadata', restoreAfterMediaChange);
     video.removeEventListener('playing', restoreAfterMediaChange);
+    for (const type of LOUDNESS_EVENTS) video.removeEventListener(type, onMediaProgress);
     videoBinding = null;
     boundVideo = null;
   }
@@ -1851,9 +1921,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // лента приходит со своим <video>, и именно на первых кадрах YouTube
     // успевает выставить mute до того, как мы восстановим состояние.
     mutedGuardUntil = Date.now() + MUTED_GUARD_MS;
-    // Новый ролик — новый уровень: заново читаем его из ответа плеера,
-    // но сперва дожидаемся, пока определится тип дорожки.
-    beginLoudnessSettle();
+    // Новый ролик — новый уровень: прежнее решение снимаем сразу, новое
+    // появится, как только снимок станет согласованным.
+    resetLoudness();
     refreshLoudness();
     const current = Number(logicalOf(video));
     if (!validVolume(preferredVolume) && validVolume(current)) {
@@ -1889,10 +1959,17 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         updateUI();
       }, 0);
     };
-    videoBinding = { video, onVolumeChange, restoreAfterMediaChange };
+    // Решение о выравнивании обновляем по событиям самой дорожки, а не по
+    // часам: именно к этим моментам плеер и досоздаёт то, чего не хватало
+    // снимку. Секундный тик остаётся страховкой.
+    const onMediaProgress = () => {
+      if (video === boundVideo) refreshLoudness();
+    };
+    videoBinding = { video, onVolumeChange, restoreAfterMediaChange, onMediaProgress };
     video.addEventListener('volumechange', onVolumeChange);
     video.addEventListener('loadedmetadata', restoreAfterMediaChange);
     video.addEventListener('playing', restoreAfterMediaChange);
+    for (const type of LOUDNESS_EVENTS) video.addEventListener(type, onMediaProgress);
     updateUI();
   }
 
@@ -2502,7 +2579,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   }, 1000);
   const prepareForNavigation = () => {
     // Переход — самый ранний сигнал смены ролика, раньше нового <video>.
-    beginLoudnessSettle();
+    resetLoudness();
     if (!SETTINGS.useNativeSlider) {
       setEarlyNativeHidden(true);
       beginShortsMountWait();
@@ -2544,7 +2621,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     clearTimeout(persistTimer);
     clearTimeout(earlyHideSafetyTimer);
     clearTimeout(shortsMountRetryTimer);
-    clearTimeout(loudnessPollTimer);
     for (const off of teardown.splice(0)) {
       try {
         off();
