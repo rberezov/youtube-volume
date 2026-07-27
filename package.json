@@ -1,6 +1,6 @@
 {
   "name": "youtube-exponential-volume",
-  "version": "1.24.4",
+  "version": "1.24.5",
   "private": true,
   "description": "Chrome-расширение: экспоненциальная регулировка громкости в YouTube и удлинённый точный ползунок",
   "scripts": {

@@ -557,8 +557,8 @@ run('collapse: форма и длительность сворачивания',
     });
     await icon.close();
     check(
-      'значок занимает 47.4% кнопки',
-      Math.abs(size.ratio - 0.474) < 0.02,
+      'значок занимает 50.7% кнопки',
+      Math.abs(size.ratio - 0.507) < 0.02,
       `${(size.ratio * 100).toFixed(1)}% при кнопке ${size.btn}px`
     );
   }
