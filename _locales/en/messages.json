@@ -79,7 +79,7 @@
     "message": "Normalize video loudness"
   },
   "normalizeDescription": {
-    "message": "Bring quiet videos up to a common level"
+    "message": "Bring quiet videos up when YouTube's stable volume is off or unavailable"
   },
   "saveSaved": {
     "message": "Saved"
