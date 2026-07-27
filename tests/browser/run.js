@@ -13,6 +13,7 @@ const HARNESSES = [
   'layout-stress.js',
   'shorts-clicks.js',
   'dom-churn.js',
+  'collapse.js',
   'carryover.js',
   'mute-persist.js',
   'generation.js',

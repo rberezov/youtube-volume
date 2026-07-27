@@ -1368,18 +1368,28 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     /* автосворачивание: без курсора остаётся только кнопка; переходы
        включаются лишь на время переключения (.ytev-animating), чтобы
        не мешать замерам layout() */
-    .ytev-box.ytev-animating { transition: gap .25s ease, padding .25s ease; }
+    .ytev-box.ytev-animating {
+      transition: gap .25s ease, padding .25s ease, border-radius .25s ease;
+    }
     .ytev-box.ytev-animating .ytev-slider { transition: width .25s ease, opacity .2s ease; }
-    .ytev-box.ytev-animating .ytev-label { transition: max-width .25s ease, opacity .2s ease; }
+    /* min-width подписи тоже в переходе: без него при разворачивании она
+       мгновенно занимала свои 2.5em (min-width перебивает max-width) и
+       выпрыгивала раньше, чем росла шкала. */
+    .ytev-box.ytev-animating .ytev-label {
+      transition: max-width .25s ease, min-width .25s ease, opacity .2s ease;
+    }
     /* Свёрнутое состояние — ровный круг со значком по центру, как
        штатные круглые кнопки YouTube. Кнопка занимает «высота − 4px»,
        поэтому симметричные поля по 2px дают ширину, равную высоте.
-       border-radius перебивает инлайновое скругление, скопированное с
-       плашки, поэтому !important. */
+       Скругление задаётся в пикселях (половина высоты), а не в процентах:
+       50% на ещё широком блоке — это эллипс, и в начале сворачивания
+       рамка заметно вспухала по бокам, прежде чем сжаться. В пикселях та
+       же величина и анимируется, и на квадрате даёт ровный круг.
+       !important перебивает инлайновое скругление, скопированное с плашки. */
     .ytev-box.ytev-collapsed { gap: 0; padding: 0; }
     .ytev-box.ytev-framed.ytev-collapsed {
       padding: 0 2px;
-      border-radius: 50% !important;
+      border-radius: var(--ytev-round, 50%) !important;
     }
     .ytev-box.ytev-collapsed .ytev-slider {
       width: 0 !important;
@@ -1390,6 +1400,13 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       max-width: 0;
       min-width: 0;
       opacity: 0;
+    }
+    /* Уважаем системную настройку: там, где движение просят убрать,
+       сворачивание должно происходить мгновенно, а не быстро. */
+    @media (prefers-reduced-motion: reduce) {
+      .ytev-box.ytev-animating,
+      .ytev-box.ytev-animating .ytev-slider,
+      .ytev-box.ytev-animating .ytev-label { transition: none; }
     }
     /* подсветка при наведении — внутренний скруглённый слой с одинаковым
        пиксельным зазором со всех четырёх сторон, как у штатных «пилюль»
@@ -1709,6 +1726,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       ui.box.classList.add('ytev-framed');
       st.background = 'rgba(0, 0, 0, .6)';
       st.borderRadius = h / 2 + 'px';
+      st.setProperty('--ytev-round', h / 2 + 'px'); // свёрнутый круг
       st.height = h + 'px';
       st.margin = '0'; // положение задаёт слой (positionOverlay)
       st.setProperty('--ytev-pad', pad + 'px');
@@ -1726,6 +1744,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       ui.box.classList.add('ytev-framed');
       st.background = shortsFrame.bg;
       st.borderRadius = shortsFrame.radius;
+      st.setProperty('--ytev-round', h / 2 + 'px'); // свёрнутый круг
       st.height = h + 'px';
       st.margin = '0';
       st.setProperty('--ytev-pad', pad + 'px');
@@ -1760,6 +1779,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       st.height = '';
       st.backdropFilter = '';
       st.removeProperty('--ytev-pad');
+      st.removeProperty('--ytev-round');
       st.removeProperty('--ytev-hl-inset');
       st.removeProperty('--ytev-hl-radius');
       return;
@@ -1770,6 +1790,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     st.margin = '0 ' + edgeGap + 'px';
     st.background = s.backgroundColor;
     st.borderRadius = s.borderRadius;
+    st.setProperty('--ytev-round', h / 2 + 'px'); // свёрнутый круг
     st.height = h + 'px';
     // единый отступ со всех сторон: сверху/снизу его задаёт центровка
     // содержимого (кнопка ужата до «высота минус два отступа»), слева и
@@ -1915,6 +1936,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // только на время переключения, чтобы не мешать замерам layout().
   let collapseTimer = 0;
   let animTimer = 0;
+  let animCleanup = null;
   function updateCollapsed(animate = true) {
     if (!ui) return;
     // разворот держит только клавиатурный фокус (:focus-visible) — обычный
@@ -1930,13 +1952,34 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       ui.box.classList.toggle('ytev-collapsed', want);
       return;
     }
-    ui.box.classList.add('ytev-animating');
-    ui.box.classList.toggle('ytev-collapsed', want);
-    clearTimeout(animTimer);
-    animTimer = setTimeout(() => {
-      if (ui) ui.box.classList.remove('ytev-animating');
-      scheduleLayout();
-    }, 350);
+    const box = ui.box;
+    const slider = ui.slider;
+    // Быстрое «увёл-вернул курсор» приходит раньше конца прошлой анимации:
+    // прибираем за ней, иначе слушатели копились бы на блоке.
+    if (animCleanup) animCleanup();
+    box.classList.add('ytev-animating');
+    box.classList.toggle('ytev-collapsed', want);
+    // Конец анимации ловим событием, а не отсчётом: прежние 350мс были
+    // взяты с запасом к переходам в 250мс, и лишние 100мс замеры layout()
+    // просто простаивали. Таймер остаётся страховкой — переход может не
+    // случиться вовсе (нулевая длительность при prefers-reduced-motion,
+    // свёрнутый блок вне экрана), и снимать класс всё равно нужно.
+    const finish = () => {
+      clearTimeout(animTimer);
+      animTimer = 0;
+      animCleanup = null;
+      box.removeEventListener('transitionend', onEnd);
+      box.classList.remove('ytev-animating');
+      if (ui && ui.box === box) scheduleLayout();
+    };
+    const onEnd = (e) => {
+      // Ширину шкалы меняет самый долгий переход; чужие всплывшие события
+      // (например, opacity подсветки) конец анимации не означают.
+      if (e.target === slider && e.propertyName === 'width') finish();
+    };
+    animCleanup = finish;
+    box.addEventListener('transitionend', onEnd);
+    animTimer = setTimeout(finish, 400);
   }
 
   function unbindVideo() {
@@ -2741,6 +2784,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   function disposeInstance() {
     if (domObserver) domObserver.disconnect();
     clearTimeout(sweepTimer);
+    clearTimeout(collapseTimer);
+    if (animCleanup) animCleanup();
     clearTimeout(saveVolumeTimer);
     clearTimeout(saveMutedTimer);
     clearTimeout(persistTimer);
