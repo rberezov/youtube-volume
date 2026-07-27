@@ -14,6 +14,7 @@ const HARNESSES = [
   'shorts-clicks.js',
   'dom-churn.js',
   'collapse.js',
+  'spacing.js',
   'popup-fit.js',
   'carryover.js',
   'mute-persist.js',

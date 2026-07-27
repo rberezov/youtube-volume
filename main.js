@@ -1253,7 +1253,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       align-self: center;
       box-sizing: border-box;
       min-width: 0;
-      margin: 0 8px;
+      /* Поля задаёт syncFrameStyle: они дополняют отступы соседей, а не
+         прибавляются к ним. Постоянные 8px здесь давали двойной зазор. */
+      margin: 0;
       position: relative;
       /* В актуальном интерфейсе Shorts вся строка кнопок получает
          pointer-events:none, а свойство наследуется. Возвращаем
@@ -1836,6 +1838,32 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // Копирование с живого элемента даёт точное совпадение размеров и
   // оформления в любой версии интерфейса и теме; в старом интерфейсе
   // фоновых плашек нет — блок остаётся прозрачным.
+  // Сколько нам добавить с одной стороны, чтобы суммарный зазор с соседом
+  // получился ровно edgeGap. `side` — свойство соседа, обращённое к нам.
+  function edgeMargin(side) {
+    if (!ui) return 0;
+    // Ближайший сосед может быть спрятанным штатным блоком: он места не
+    // занимает, и его поля ни на что не влияют — идём до первого видимого.
+    const back = side === 'marginRight';
+    let neighbour = back ? ui.box.previousElementSibling : ui.box.nextElementSibling;
+    while (neighbour && !neighbour.getClientRects().length) {
+      neighbour = back ? neighbour.previousElementSibling : neighbour.nextElementSibling;
+    }
+    let theirs = 0;
+    if (neighbour) {
+      const value = parseFloat(getComputedStyle(neighbour)[side]);
+      if (Number.isFinite(value)) theirs = value;
+    }
+    const row = ui.box.parentElement;
+    if (row) {
+      const gap = parseFloat(getComputedStyle(row).columnGap);
+      if (Number.isFinite(gap)) theirs = Math.max(theirs, gap);
+    }
+    // edgeGap считается от высоты плашки и на старой плоской вёрстке может
+    // быть ещё не известен — тогда берём обычный ритм YouTube.
+    return Math.max(0, Math.round((edgeGap || 8) - theirs));
+  }
+
   function syncFrameStyle() {
     const player = getPlayer();
     if (uiResizeObserver && observedPill && isShorts()) {
@@ -1876,7 +1904,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       st.borderRadius = shortsFrame.radius;
       st.setProperty('--ytev-round', h / 2 + 'px'); // свёрнутый круг
       st.height = h + 'px';
-      st.margin = '0';
+      st.margin = `0 ${edgeMargin('marginLeft')}px 0 ${edgeMargin('marginRight')}px`;
       st.setProperty('--ytev-pad', pad + 'px');
       st.setProperty('--ytev-hl-inset', shortsInset + 'px');
       st.setProperty(
@@ -1904,6 +1932,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const st = ui.box.style;
     ui.box.classList.toggle('ytev-framed', !!surface);
     if (!surface) {
+      st.margin = `0 ${edgeMargin('marginLeft')}px 0 ${edgeMargin('marginRight')}px`;
       st.background = '';
       st.borderRadius = '';
       st.height = '';
@@ -1917,7 +1946,12 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const s = surface.style;
     const h = Math.round(surface.h);
     if (!edgeGap) edgeGap = Math.max(6, Math.round(h * 0.2));
-    st.margin = '0 ' + edgeGap + 'px';
+    // Свой отступ дополняет чужой, а не прибавляется к нему. У соседних
+    // контролов YouTube есть собственные поля (у «пилюли» это margin-right,
+    // у строк нового интерфейса — gap), и наши восемь пикселей ложились
+    // сверху: между кнопкой воспроизведения и нашим блоком выходило 16px
+    // вместо восьми, вдвое больше, чем между штатными кнопками.
+    st.margin = `0 ${edgeMargin('marginLeft')}px 0 ${edgeMargin('marginRight')}px`;
     st.background = s.backgroundColor;
     st.borderRadius = s.borderRadius;
     st.setProperty('--ytev-round', h / 2 + 'px'); // свёрнутый круг
@@ -2526,6 +2560,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       const cls = typeof el.className === 'string' ? el.className : '';
       if (!VOLUME_HINT.test(cls) && !VOLUME_HINT.test(el.id || '')) return false;
       const r = el.getBoundingClientRect();
+      // Узел, на место которого мы встаём, прячем всегда — даже если он уже
+      // нулевого размера. Нулевой, но видимый элемент остаётся элементом
+      // flex-строки и получает промежуток с обеих сторон: между кнопкой
+      // воспроизведения и нашим блоком выходило 16px вместо восьми.
+      if (el === shortsMountAnchor) return true;
       if (!r.width || !r.height) return false; // уже не видно
       return r.width <= 160 && r.height <= 160; // это кнопка, а не контейнер
     });
