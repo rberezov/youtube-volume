@@ -498,10 +498,52 @@ run('collapse: форма и длительность сворачивания',
     `${noLabel.right}px при поле ${noLabel.pad}px`
   );
   check(
-    'подпись на месте — поле обычное',
-    Math.abs(withLabel.right - withLabel.pad) <= 1,
+    'с подписью поле — среднее промежутка и обычного поля',
+    Math.abs(withLabel.right - (withLabel.pad + withLabel.pad / 2) / 2) <= 1,
     `${withLabel.right}px при поле ${withLabel.pad}px`
   );
+
+  // --- проценты стоят посередине -----------------------------------------
+  // Раньше подпись липла к шкале: слева от неё был промежуток в половину
+  // поля рамки, справа — целое поле. Просвет должен быть одинаковым.
+  {
+    const centred = await openPage(browser, {
+      withMain: { autoCollapse: false, showPercent: true },
+      errors,
+    });
+    const gaps = await centred.evaluate(() => {
+      const box = document.querySelector('.ytev-box').getBoundingClientRect();
+      const track = document.querySelector('.ytev-slider').getBoundingClientRect();
+      const label = document.querySelector('.ytev-label').getBoundingClientRect();
+      const style = getComputedStyle(document.querySelector('.ytev-box'));
+      return {
+        before: label.left - track.right,
+        after: box.right - parseFloat(style.borderRightWidth || 0) - label.right,
+      };
+    });
+    await centred.close();
+    check(
+      'проценты посередине между шкалой и краем рамки',
+      Math.abs(gaps.before - gaps.after) <= 1,
+      `слева ${gaps.before.toFixed(1)}px, справа ${gaps.after.toFixed(1)}px`
+    );
+  }
+
+  // --- значок звука не должен быть крупным -------------------------------
+  {
+    const icon = await openPage(browser, { withMain: { autoCollapse: false }, errors });
+    const size = await icon.evaluate(() => {
+      const btn = document.querySelector('.ytev-mute').getBoundingClientRect();
+      const svg = document.querySelector('.ytev-mute svg').getBoundingClientRect();
+      return { ratio: svg.width / btn.width, btn: Math.round(btn.width) };
+    });
+    await icon.close();
+    check(
+      'значок занимает 60% кнопки, а не две трети',
+      Math.abs(size.ratio - 0.6) < 0.02,
+      `${(size.ratio * 100).toFixed(1)}% при кнопке ${size.btn}px`
+    );
+  }
 });
 
 // Поля рамки в развёрнутом состоянии при включённых и выключенных процентах.

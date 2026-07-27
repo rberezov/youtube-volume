@@ -1286,6 +1286,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
          Внутри шторки отступ обрезается вместе с содержимым, ширины рамки
          не меняет — и левый край дорожки стоит на месте от первого кадра. */
       --ytev-gap: calc(var(--ytev-pad, 10px) * .5);
+      /* Проценты стоят посередине между концом шкалы и краем рамки: поля
+         слева и справа от них равны. Величина — среднее прежних двух
+         (промежутка после шкалы и поля рамки), поэтому ширина блока не
+         меняется, а подпись перестаёт липнуть к шкале. */
+      --ytev-pct-side: calc((var(--ytev-gap) + var(--ytev-pad, 10px)) / 2);
       gap: 0;
       /* «Хвост» за концом шкалы, когда подписи с процентами нет. С обычным
          полем дорожка упиралась в рамку почти вплотную, а у штатной кнопки
@@ -1348,9 +1353,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     }
     .ytev-box:not(.ytev-framed) .ytev-mute { height: 36px; }
     .ytev-mute svg {
-      /* У штатной кнопки YouTube SVG 24×24 внутри зоны 36×36. */
-      width: 66.6667%;
-      height: 66.6667%;
+      /* У штатной кнопки YouTube SVG 24×24 внутри зоны 36×36 — это 66.7%.
+         Наша рамка ниже штатной пилюли, и в ней тот же значок смотрелся
+         крупновато, поэтому доля чуть меньше. */
+      width: 60%;
+      height: 60%;
       display: block;
       overflow: visible;
     }
@@ -1436,10 +1443,26 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
        звука фокус остаётся на ней, и обрезка снималась бы — свёрнутый блок
        превращался в кружок, из которого торчала шкала во всю длину. */
     .ytev-slot:has(:focus-visible) { overflow: visible; }
-    .ytev-slot > * { margin-left: var(--ytev-gap); }
+    /* Селектор через .ytev-box намеренно: у самой шкалы ниже объявлено
+       margin: 0, и при равной специфичности оно перебивало этот отступ —
+       промежуток молча уезжал в конец шторки, из-за чего проценты стояли
+       дальше от шкалы, чем от края рамки. */
+    .ytev-box .ytev-slot > * { margin-left: var(--ytev-gap); }
+    .ytev-box .ytev-label-slot > * { margin-left: var(--ytev-pct-side); }
     .ytev-box.ytev-mirrored .ytev-slot > * {
       margin-left: 0;
       margin-right: var(--ytev-gap);
+    }
+    .ytev-box.ytev-mirrored .ytev-label-slot > * {
+      margin-left: 0;
+      margin-right: var(--ytev-pct-side);
+    }
+    .ytev-box.ytev-framed:not(.ytev-nolabel):not(.ytev-collapsed) {
+      padding-right: var(--ytev-pct-side);
+    }
+    .ytev-box.ytev-framed.ytev-mirrored:not(.ytev-nolabel):not(.ytev-collapsed) {
+      padding-right: var(--ytev-lead);
+      padding-left: var(--ytev-pct-side);
     }
     /* Зеркальный режим: блок раскрывается влево, значит шкала должна
        выезжать из-под кнопки, оставаясь прижатой к ней правым краем. */
@@ -1459,7 +1482,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
        та же величина: тогда max-width шторки идёт от нуля ровно до
        натуральной ширины подписи, и открытие размазано на всю анимацию, а
        не заканчивается в первые кадры. */
-    .ytev-label-slot { max-width: calc(var(--ytev-pct) + var(--ytev-gap)); }
+    .ytev-label-slot { max-width: calc(var(--ytev-pct) + var(--ytev-pct-side)); }
     /* Свёрнутое состояние — ровный круг со значком по центру, как
        штатные круглые кнопки YouTube. Кнопка занимает «высота − 4px»,
        поэтому симметричные поля по 2px дают ширину, равную высоте.
