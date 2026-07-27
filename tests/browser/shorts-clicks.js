@@ -145,6 +145,70 @@ async function openShorts(browser, html) {
   );
   await overlayPage.close();
 
+  // --- строка кнопок приходит с опозданием ------------------------------
+  // Полевой замер: новая лента видна на 0мс, строка появляется на 164–172мс
+  // и сразу целиком, вместе с volume-controls. Раньше это закрывалось окном
+  // ожидания в 700мс; теперь ждём факта. Проверяем оба следствия: пока
+  // строки нет, резервная тёмная кнопка не мелькает, а как только строка
+  // пришла — блок встаёт именно в неё, без всякого таймера.
+  {
+    // Строку вырезаем из активной ленты и возвращаем скриптом через 1500мс —
+    // заведомо позже и прежнего окна в 700мс, и паузы подъёма страницы.
+    // Рядом кладём соседнюю ленту из буфера, у которой строка уже есть:
+    // именно так выглядит настоящий переход, и именно она отличает «строка
+    // ещё не приехала» от «на этой сборке строки не бывает».
+    const rowHtml = SHORTS.match(
+      /<ytd-shorts-player-controls[\s\S]*?<\/ytd-shorts-player-controls>/
+    )[0];
+    const late = bare
+      .replace(
+        '<ytd-reel-video-renderer id="reel-video-renderer">',
+        `<ytd-reel-video-renderer id="reel-buffered" style="display:none">
+           <div class="player-controls">${rowHtml}</div>
+         </ytd-reel-video-renderer>
+         <ytd-reel-video-renderer id="reel-video-renderer">`
+      )
+      .replace(
+        '</body>',
+        `<script>
+          setTimeout(() => {
+            const host = document.querySelector('#reel-video-renderer .player-controls');
+            const slot = document.createElement('div');
+            host.appendChild(slot);
+            slot.outerHTML = ${JSON.stringify(rowHtml)};
+          }, 1500);
+        </script></body>`
+      );
+    const latePage = await openShorts(browser, late);
+
+    const early = await latePage.evaluate(() => ({
+      overlay: !!document.querySelector('.ytev-overlay .ytev-box'),
+      boxes: document.querySelectorAll('.ytev-box').length,
+      rowInActive: !!document.querySelector('#reel-video-renderer ytd-shorts-player-controls'),
+    }));
+    check(
+      'пока строки нет, тёмная кнопка не мелькает',
+      early.rowInActive === false && early.boxes === 0,
+      JSON.stringify(early)
+    );
+
+    await latePage.waitForTimeout(1200);
+    const after = await latePage.evaluate(() => {
+      const box = document.querySelector('.ytev-box');
+      return {
+        inRow: !!(box && box.closest('#reel-video-renderer ytd-shorts-player-controls')),
+        overlay: !!document.querySelector('.ytev-overlay .ytev-box'),
+        boxes: document.querySelectorAll('.ytev-box').length,
+      };
+    });
+    check(
+      'опоздавшая строка подхвачена: блок встал в неё, а не в слой',
+      after.inRow && !after.overlay && after.boxes === 1,
+      JSON.stringify(after)
+    );
+    await latePage.close();
+  }
+
   await browser.close();
   if (errors.length) {
     console.log('pageerrors:', errors);

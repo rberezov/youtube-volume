@@ -1959,7 +1959,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     if (!video || video === boundVideo) return;
     unbindVideo();
     boundVideo = video;
-    if (isShorts()) beginShortsMountWait();
     // Новый элемент — снова подавляем autoplay-mute: в Shorts каждая лента
     // приходит со своим <video>, и именно на первых кадрах YouTube успевает
     // выставить mute до того, как мы восстановим состояние.
@@ -2078,32 +2077,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     observedChain.clear();
   }
 
-  const SHORTS_NATIVE_MOUNT_GRACE_MS = 700;
-  let shortsMountWaitUntil = isShorts()
-    ? Date.now() + SHORTS_NATIVE_MOUNT_GRACE_MS
-    : 0;
-  let shortsMountRetryTimer = 0;
-
-  function beginShortsMountWait() {
-    if (!isShorts()) return;
-    shortsMountWaitUntil = Date.now() + SHORTS_NATIVE_MOUNT_GRACE_MS;
-  }
-
-  // Появление штатной строки — обычная мутация DOM, её ловит наблюдатель и
-  // сразу зовёт ensureUI(). Поэтому опрос каждые 80мс отсюда ушёл, остался
-  // один срок: если строка так и не пришла, по нему встаём в накладной слой.
-  function waitForShortsNativeMount() {
-    if (!isShorts()) return false;
-    const remaining = shortsMountWaitUntil - Date.now();
-    if (remaining <= 0) return false;
-    clearTimeout(shortsMountRetryTimer);
-    shortsMountRetryTimer = setTimeout(() => {
-      shortsMountRetryTimer = 0;
-      ensureUI();
-    }, remaining);
-    return true;
-  }
-
   // Куда встраивать блок. На обычной странице — в строку управления
   // плеера. В Shorts своей строки управления нет (у плеера минимальная
   // обвязка, которая ещё и меняется от версии к версии), поэтому кладём
@@ -2123,11 +2096,15 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         shortsMountAnchor = volumeHost;
         return { host: row, before: volumeHost, overlay: false };
       }
-      // Новый Shorts сначала создаёт видео, а штатную строку кнопок добавляет
-      // несколькими кадрами позже. Не показываем на это время резервную тёмную
-      // кнопку: ранний CSS уже спрятал штатную, а короткий поиск обычно успевает
-      // найти её настоящий контейнер и сразу построить окончательный интерфейс.
-      if (waitForShortsNativeMount()) return null;
+      // Новый ролик приходит раньше своей строки кнопок (замер: лента на 0мс,
+      // строка на 164–172мс), и до её появления нельзя вставать никуда: ни
+      // резервной тёмной кнопкой в накладной слой, ни в строку самого плеера —
+      // потом пришлось бы переезжать. Раньше это закрывалось окном в 700мс,
+      // то есть догадкой о задержке. Теперь ждём факта: пока строка не
+      // собрана, не строим ничего, а наблюдатель за DOM позовёт снова, как
+      // только она появится. Собранная строка без блока громкости —
+      // достоверное «штатной громкости здесь не будет».
+      if (shortsControlsExpected() && !shortsControlsReady()) return null;
     }
     // Иначе штатная строка управления плеера. Исключение — если в Shorts
     // полоса перемотки размещена поверх строки: тогда наша шкала легла бы
@@ -2228,9 +2205,16 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     el.getAttribute('role') === 'button' ||
     Math.abs(r.width - r.height) < 12;
 
-  // активная лента: атрибута is-active в новом интерфейсе нет, зато
-  // отрисованная лента лежит в #reel-overlay-container
+  // Активная лента. Самый надёжный признак — та, внутри которой лежит
+  // текущий плеер: он в Shorts один. Атрибут is-active в новом интерфейсе
+  // может отсутствовать даже у видимой ленты, поэтому он идёт после, а не
+  // первым — иначе выбор мог достаться соседней ленте из буфера.
   function activeReel() {
+    const player = getPlayer();
+    if (player && typeof player.closest === 'function') {
+      const owner = player.closest('ytd-reel-video-renderer');
+      if (owner) return owner;
+    }
     return (
       document.querySelector('ytd-reel-video-renderer[is-active]') ||
       document.querySelector(
@@ -2238,6 +2222,42 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       ) ||
       document.querySelector('ytd-reel-video-renderer')
     );
+  }
+
+  /**
+   * Собрана ли строка управления Shorts целиком.
+   *
+   * Полевой замер двух переходов подряд: новая лента видна на 0мс, строка
+   * появляется на 164мс и 172мс — и появляется сразу вся, вместе с
+   * volume-controls. Состояния «строка уже собрана, а блока громкости ещё
+   * нет» не было ни разу. Значит собранная строка без громкости — это
+   * достоверный признак «штатной громкости здесь не будет», и накладной слой
+   * можно строить по факту, а не по истечении окна ожидания.
+   *
+   * Проверяем структуру, а не внутренние поля Polymer: didCallReady и
+   * isAttached недокументированы, и требовать их — значит выключить блок в
+   * Shorts целиком при первом же переименовании. Если они есть и явно
+   * говорят «ещё не готов» — верим им; если их нет, полагаемся на структуру.
+   */
+  // Пользуется ли эта сборка YouTube строкой ytd-shorts-player-controls
+  // вообще. Отличает «строка ещё не приехала» от «строки здесь не бывает»:
+  // при переходе соседние ленты в буфере свои строки уже имеют, а на сборке
+  // без этого компонента его нет во всём документе — и ждать нечего.
+  function shortsControlsExpected() {
+    return !!document.querySelector('ytd-shorts-player-controls');
+  }
+
+  function shortsControlsReady() {
+    const scope = shortsScope();
+    const controls = scope && scope.querySelector('ytd-shorts-player-controls');
+    if (!controls || !controls.isConnected) return false;
+    if (!controls.querySelector('#left-controls > yt-button-shape')) return false;
+    if (!controls.querySelector('#right-controls > #menu-button')) return false;
+    const controller = controls.polymerController;
+    if (controller && (controller.didCallReady === false || controller.isAttached === false)) {
+      return false;
+    }
+    return true;
   }
 
   const shortsScope = () =>
@@ -2280,9 +2300,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const el =
       reel.querySelector('volume-controls, .ytdVolumeControlsHost') ||
       reel.querySelector('ytd-shorts-player-controls [class*="volume" i]');
-    if (!el) return null;
-    if (hiddenNative.has(el)) return el; // спрятан нами — всё равно годится
-    return el.getBoundingClientRect().width ? el : null;
+    // Годится сам факт существования узла, а не его размеры: после скрытия
+    // расширением он 0×0 и visibility: hidden, но остаётся правильным якорем —
+    // и ровно так же выглядит в первые мгновения после появления.
+    return el && el.isConnected ? el : null;
   }
 
   function hideNativeVolume() {
@@ -2686,7 +2707,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     resetLoudness();
     if (!SETTINGS.useNativeSlider) {
       setEarlyNativeHidden(true);
-      beginShortsMountWait();
     }
   };
   const refreshAfterNavigation = () =>
@@ -2725,7 +2745,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     clearTimeout(saveMutedTimer);
     clearTimeout(persistTimer);
     clearTimeout(earlyHideSafetyTimer);
-    clearTimeout(shortsMountRetryTimer);
     for (const off of teardown.splice(0)) {
       try {
         off();

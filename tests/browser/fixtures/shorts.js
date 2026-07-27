@@ -64,7 +64,9 @@ module.exports = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
                       </div>
                     </volume-controls>
                   </div>
-                  <div id="right-controls"></div>
+                  <div id="right-controls">
+                    <yt-button-shape id="menu-button"><button>⋯</button></yt-button-shape>
+                  </div>
                 </ytd-shorts-player-controls>
               </div>
             </div>
