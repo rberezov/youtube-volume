@@ -92,7 +92,8 @@ run('collapse: форма и длительность сворачивания',
   const early = await page.evaluate(async () => {
     const box = document.querySelector('.ytev-box');
     const label = document.querySelector('.ytev-label');
-    box.dispatchEvent(new MouseEvent('mouseenter'));
+    const scope = () => document.querySelector('.ytp-left-controls');
+    scope().dispatchEvent(new MouseEvent('mouseenter'));
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     return {
       labelWidth: Math.round(label.getBoundingClientRect().width),
@@ -123,21 +124,22 @@ run('collapse: форма и длительность сворачивания',
   // ширина обязана только уменьшаться: ни доводки до конца, ни скачка.
   const reversal = await page.evaluate(async () => {
     const box = document.querySelector('.ytev-box');
-    const slider = document.querySelector('.ytev-slider');
+    const scope = () => document.querySelector('.ytp-left-controls');
+    const slider = document.querySelector('.ytev-slot');
     const width = () => slider.getBoundingClientRect().width;
     const frame = () => new Promise((done) => requestAnimationFrame(done));
 
-    box.dispatchEvent(new MouseEvent('mouseleave'));
+    scope().dispatchEvent(new MouseEvent('mouseleave'));
     while (box.classList.contains('ytev-animating')) await frame();
 
     const opening = [];
-    box.dispatchEvent(new MouseEvent('mouseenter'));
+    scope().dispatchEvent(new MouseEvent('mouseenter'));
     for (let i = 0; i < 6; i += 1) {
       await frame();
       opening.push(width());
     }
     const atLeave = width();
-    box.dispatchEvent(new MouseEvent('mouseleave'));
+    scope().dispatchEvent(new MouseEvent('mouseleave'));
     const closing = [];
     for (let i = 0; i < 30; i += 1) {
       await frame();
@@ -163,6 +165,78 @@ run('collapse: форма и длительность сворачивания',
   );
 
   await page.close();
+
+  // --- шкала выезжает, а не растягивается --------------------------------
+  // Раньше анимировалась ширина самого <input>: он появлялся целиком, но
+  // сжатым, и на глазах растягивался — бегунок ползёт, заливка тянется.
+  // Теперь ширину меняет обрезающая обёртка, а <input> внутри постоянного
+  // размера, как у штатной шкалы YouTube.
+  {
+    const curtain = await openPage(browser, { withMain: { autoCollapse: true }, errors });
+    const widths = await curtain.evaluate(async () => {
+      const scope = document.querySelector('.ytp-left-controls');
+      const box = document.querySelector('.ytev-box');
+      const slot = document.querySelector('.ytev-slot');
+      const input = document.querySelector('.ytev-slider');
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+
+      scope.dispatchEvent(new MouseEvent('mouseleave'));
+      while (box.classList.contains('ytev-animating')) await frame();
+      const full = input.getBoundingClientRect().width;
+
+      scope.dispatchEvent(new MouseEvent('mouseenter'));
+      const samples = [];
+      for (let i = 0; i < 8; i += 1) {
+        await frame();
+        samples.push({
+          slot: slot.getBoundingClientRect().width,
+          input: input.getBoundingClientRect().width,
+        });
+      }
+      return { full, samples };
+    });
+    await curtain.close();
+
+    const mid = widths.samples.filter((s) => s.slot > 1 && s.slot < widths.full - 1);
+    check(
+      'в середине разворота обёртка уже, чем сама шкала',
+      mid.length > 0,
+      `замеров в середине: ${mid.length} из ${widths.samples.length}`
+    );
+    check(
+      'сама шкала при этом своего размера не меняет',
+      mid.every((s) => Math.abs(s.input - widths.full) < 1),
+      mid.map((s) => `${Math.round(s.slot)}/${Math.round(s.input)}`).join(' ')
+    );
+  }
+
+  // --- наведение считается по строке управления, а не по блоку -----------
+  // Штатный регулятор не схлопывается, когда ведёшь мышь к соседней кнопке.
+  {
+    const row = await openPage(browser, { withMain: { autoCollapse: true }, errors });
+    const collapsed = () =>
+      row.evaluate(() =>
+        document.querySelector('.ytev-box').classList.contains('ytev-collapsed')
+      );
+
+    await row.hover('.ytev-box');
+    await waitFor(async () => !(await collapsed()), { what: 'разворачивания' });
+
+    // Указатель на соседней кнопке той же строки — блок обязан остаться
+    // раскрытым, хотя курсор уже не над ним.
+    await row.hover('.ytp-time-display');
+    await row.waitForTimeout(400);
+    check('курсор на соседнем элементе строки — блок раскрыт', !(await collapsed()));
+
+    // Ушли из строки целиком — сворачивается.
+    await row.mouse.move(10, 10);
+    await waitFor(async () => await collapsed(), {
+      timeout: 1500,
+      what: 'сворачивания после ухода из строки',
+    });
+    check('уход из строки управления сворачивает блок', true);
+    await row.close();
+  }
 
   // --- старый режим: задержка перед сворачиванием ------------------------
   // С длинной шкалой мелкое движение мышью легко выводит курсор за рамку, и
@@ -204,9 +278,9 @@ run('collapse: форма и длительность сворачивания',
     await delayed.hover('.ytev-box');
     await waitFor(async () => !(await state()).collapsed, { what: 'повторного разворота' });
     await delayed.evaluate(() => {
-      const box = document.querySelector('.ytev-box');
-      box.dispatchEvent(new MouseEvent('mouseleave'));
-      box.dispatchEvent(new MouseEvent('mouseenter'));
+      const scope = document.querySelector('.ytp-left-controls');
+      scope.dispatchEvent(new MouseEvent('mouseleave'));
+      scope.dispatchEvent(new MouseEvent('mouseenter'));
     });
     await delayed.waitForTimeout(700);
     const returned = await state();

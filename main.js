@@ -1387,7 +1387,22 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     .ytev-box.ytev-animating {
       transition: gap .25s ease, padding .25s ease, border-radius .25s ease;
     }
-    .ytev-box.ytev-animating .ytev-slider { transition: width .25s ease, opacity .2s ease; }
+    /* Обрезающая обёртка шкалы: ширину меняет она, а <input> внутри всё
+       время своего размера — поэтому шкала выезжает, а не растягивается. */
+    .ytev-slot {
+      display: flex;
+      align-items: center;
+      /* Сжиматься обёртке можно: если замер свободного места ошибся, flex
+         ужмёт её, и layout() увидит это и вернёт штатный ползунок. Сам
+         <input> внутри при этом остаётся своего размера. */
+      flex: 0 1 auto;
+      min-width: 0;
+      overflow: hidden;
+    }
+    /* Зеркальный режим: блок раскрывается влево, значит шкала должна
+       выезжать из-под кнопки, оставаясь прижатой к ней правым краем. */
+    .ytev-box.ytev-mirrored .ytev-slot { justify-content: flex-end; }
+    .ytev-box.ytev-animating .ytev-slot { transition: width .25s ease; }
     /* min-width подписи тоже в переходе: без него при разворачивании она
        мгновенно занимала свои 2.5em (min-width перебивает max-width) и
        выпрыгивала раньше, чем росла шкала. */
@@ -1407,10 +1422,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       padding: 0 2px;
       border-radius: var(--ytev-round, 50%) !important;
     }
-    .ytev-box.ytev-collapsed .ytev-slider {
+    .ytev-box.ytev-collapsed .ytev-slot {
       width: 0 !important;
       min-width: 0 !important;
-      opacity: 0;
     }
     .ytev-box.ytev-collapsed .ytev-label {
       max-width: 0;
@@ -1449,6 +1463,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     .ytev-slider {
       -webkit-appearance: none;
       appearance: none;
+      flex: none; /* внутри обрезающей обёртки размер задаём мы, а не flex */
       min-width: 0;
       height: var(--ytev-track);
       border-radius: calc(var(--ytev-track) / 2);
@@ -1485,6 +1500,14 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   document.documentElement.appendChild(style);
 
   const MIN_SLIDER = 48; // короче — бесполезно, лучше спрятать
+
+  // Ширину задаём обоим: обёртке (её и анимируем) и самому <input> (он
+  // внутри неё постоянного размера, иначе бегунок и заливка «поехали» бы).
+  function setSliderWidth(px) {
+    const value = Math.round(px) + 'px';
+    ui.slider.style.width = value;
+    ui.slot.style.width = value;
+  }
   const SAFETY_GAP = 4;  // запас на округления, чтобы панель не «поехала»
 
   // фиксированные константы, вычисляются ОДИН раз из размеров плашки при
@@ -1884,7 +1907,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       syncFrameStyle();
       const pw = player.clientWidth;
       if (!pw) return;
-      ui.slider.style.width = MIN_SLIDER + 'px';
+      setSliderWidth(MIN_SLIDER);
       const extra = ui.box.getBoundingClientRect().width - MIN_SLIDER;
       // в строке кнопок место считаем от её левого края до края плеера
       const room = ui.overlay
@@ -1894,7 +1917,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
           extra -
           16;
       const width = Math.max(MIN_SLIDER, Math.min(pw * (activeScale() / 100), room));
-      ui.slider.style.width = Math.round(width) + 'px';
+      setSliderWidth(width);
       ui.trackW = ui.slider.getBoundingClientRect().width;
       ui.thumbPx = num(getComputedStyle(ui.box).getPropertyValue('--ytev-thumb'));
       updateUI();
@@ -1927,7 +1950,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // умеют сжиматься, и замер при текущей длине зависел бы от неё самой —
     // размер бы «дрожал» между двумя значениями. От минимума результат
     // один и тот же независимо от предыдущего состояния.
-    ui.slider.style.width = MIN_SLIDER + 'px';
+    setSliderWidth(MIN_SLIDER);
 
     let free = freeSpace(row);
     if (free < MIN_SLIDER && SETTINGS.showPercent) {
@@ -1937,8 +1960,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
     // длина — настраиваемая доля ширины плеера, ограниченная свободным местом
     const desired = player.clientWidth * (activeScale() / 100);
-    ui.slider.style.width =
-      Math.round(Math.max(MIN_SLIDER, Math.min(desired, free))) + 'px';
+    setSliderWidth(Math.max(MIN_SLIDER, Math.min(desired, free)));
 
     checkRowOverlap();
     if (!ui) return; // пересобрались в другом месте — раскладку доделает новый цикл
@@ -1950,7 +1972,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
     // подстраховка на случай неточного замера: если flex всё-таки сжал
     // ползунок до бесполезной длины — отдаём место штатному
-    if (ui.slider.getBoundingClientRect().width < MIN_SLIDER - 1) {
+    if (ui.slot.getBoundingClientRect().width < MIN_SLIDER - 1) {
       enterFallback(player);
     } else if (wasCollapsed) {
       updateCollapsed(false); // вернуть свёрнутое состояние без анимации
@@ -2135,9 +2157,20 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     for (const el of observedChain) uiResizeObserver.unobserve(el);
     observedChain.clear();
     const player = getPlayer();
-    for (let el = ui.box.parentElement; el && el !== player; el = el.parentElement) {
+    const watch = (el) => {
+      if (!el || el === ui.box || observedChain.has(el)) return;
       uiResizeObserver.observe(el);
       observedChain.add(el);
+    };
+    for (let el = ui.box.parentElement; el && el !== player; el = el.parentElement) {
+      watch(el);
+      // Свободное место считается вычитанием соседей на каждом уровне
+      // (см. freeSpace), поэтому их размеры важны не меньше своего. Раньше
+      // это ловилось само собой: flex сжимал саму шкалу, и менялся наш
+      // размер. Теперь шкала лежит в обрезающей обёртке и своего размера не
+      // меняет — за соседями приходится следить явно. Иначе исчезнувшее
+      // название главы освобождало место, а шкала оставалась короткой.
+      for (const sibling of el.children) watch(sibling);
     }
   }
 
@@ -2486,6 +2519,14 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   }
 
   // Полный демонтаж: штатная громкость возвращается на место
+  // Слежение за курсором висит на строке управления плеера, а она переживает
+  // наш блок: снимаем при любой его замене, не только при полном демонтаже.
+  function detachHoverScope() {
+    if (!ui || !ui.hoverScope) return;
+    ui.hoverScope.removeEventListener('mouseenter', ui.onScopeEnter);
+    ui.hoverScope.removeEventListener('mouseleave', ui.onScopeLeave);
+  }
+
   function teardownUI() {
     setEarlyNativeHidden(false, true);
     stopObservingUI();
@@ -2496,6 +2537,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     if (ui && ui.hiddenPill && ui.hiddenPill.isConnected) {
       ui.hiddenPill.style.display = '';
     }
+    detachHoverScope();
     for (const box of document.querySelectorAll('.ytev-box')) box.remove();
     for (const host of document.querySelectorAll('.ytev-overlay')) host.remove();
     ui = null;
@@ -2542,6 +2584,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       if (orphanMute) stale.before(orphanMute); // живую штатную кнопку возвращаем
       stale.remove();
     }
+    detachHoverScope();
     ui = null;
     // опустевшие слои тоже убираем, кроме того, куда сейчас встаём
     for (const host of document.querySelectorAll('.ytev-overlay')) {
@@ -2594,7 +2637,17 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const label = document.createElement('span');
     label.className = 'ytev-label';
 
-    box.append(muteBtn, slider, label);
+    // Шкала живёт в обрезающей обёртке, а не сворачивается сама. Раньше
+    // анимировалась ширина самого <input>: он появлялся целиком, но сжатым,
+    // и на глазах растягивался — бегунок ползёт, заливка тянется. У штатной
+    // шкалы YouTube ширина постоянна, а выезжает она из-под кнопки. Так же
+    // и здесь: ширину меняет обёртка с overflow: hidden, а <input> внутри
+    // всё время своего размера, поэтому шкала открывается постепенно.
+    const slot = document.createElement('div');
+    slot.className = 'ytev-slot';
+    slot.appendChild(slider);
+
+    box.append(muteBtn, slot, label);
 
     if (mount.before && mount.before.isConnected) {
       mount.before.after(box); // ровно на место штатного блока громкости
@@ -2612,14 +2665,18 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
     // стрелки должны двигать ползунок (шаг 0.1%), а не перематывать видео
     slider.addEventListener('keydown', (e) => e.stopPropagation());
-    // автосворачивание: следим за курсором и фокусом на блоке
-    box.addEventListener('mouseenter', () => {
+    // Автосворачивание: следим за курсором в области наведения и за фокусом
+    // на блоке. Область — строка управления плеера, а в Shorts сам блок
+    // (см. hoverScope ниже). Слушатели снимает teardownUI: строка живёт
+    // дольше нашего блока, и оставленные на ней обработчики копились бы.
+    const hoverScope = mount.overlay || mount.before ? box : controls;
+    const onScopeEnter = () => {
       if (!ui) return;
       ui.hover = true;
       clearTimeout(collapseTimer);
       updateCollapsed();
-    });
-    box.addEventListener('mouseleave', () => {
+    };
+    const onScopeLeave = () => {
       if (!ui) return;
       ui.hover = false;
       // По умолчанию сразу: штатная шкала YouTube тоже начинает уезжать в
@@ -2633,7 +2690,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       } else {
         updateCollapsed();
       }
-    });
+    };
+    hoverScope.addEventListener('mouseenter', onScopeEnter);
+    hoverScope.addEventListener('mouseleave', onScopeLeave);
     box.addEventListener('focusin', () => updateCollapsed());
     box.addEventListener('focusout', () => setTimeout(updateCollapsed, 0));
     // колесо мыши над ползунком: ±1%, с Shift ±0.1%
@@ -2651,10 +2710,18 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     );
 
     ui = {
-      box, slider, label, muteBtn,
+      box, slider, slot, label, muteBtn,
       hover: false,
       overlay: mount.overlay,
       shortsRow: !!mount.before,
+      // Область наведения. На обычной странице это вся строка управления
+      // плеера (.ytp-left-controls): пока указатель в ней, шкала остаётся
+      // раскрытой — как у штатного регулятора, который не схлопывается от
+      // движения к соседней кнопке. В Shorts своей строки нет, там область
+      // прежняя — сам блок.
+      hoverScope,
+      onScopeEnter,
+      onScopeLeave,
     };
     markDonorPill(controls);
     observeChain();
