@@ -217,6 +217,64 @@ run('spacing: зазор до соседней кнопки', async ({ browser, 
     `${squashed.value}px, якорь ${squashed.anchorInFlow ? 'в потоке' : 'вне потока'}`
   );
 
+  // --- первый Shorts в сессии ---------------------------------------------
+  // На первых кадрах ленты штатный блок громкости бывает ещё не разложен, а
+  // сразу после этого мы его прячем — и снять с него оформление становится
+  // нельзя уже никогда: у скрытого узла высота нулевая всегда. Первый Shorts
+  // из-за этого выходил без рамки: 36×36 без фона и скругления, а со
+  // следующей ленты всё вставало на место. Донором в этом случае берётся
+  // соседняя кнопка той же строки.
+  {
+    const frame = async (squash) => {
+      const page = await openPage(browser, {
+        page: 'shorts',
+        withMain: { autoCollapse: true },
+        errors,
+        before: squash
+          ? async (target) => {
+              await target.evaluate(() => {
+                const el = document.querySelector('volume-controls');
+                el.style.height = '0px';
+                el.style.overflow = 'hidden';
+              });
+            }
+          : undefined,
+      });
+      const result = await page.evaluate(() => {
+        const box = document.querySelector('.ytev-box');
+        const rect = box.getBoundingClientRect();
+        const style = getComputedStyle(box);
+        return {
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+          framed: box.classList.contains('ytev-framed'),
+          radius: style.borderTopLeftRadius,
+          opaque: style.backgroundColor,
+        };
+      });
+      await page.close();
+      return result;
+    };
+
+    const normal = await frame(false);
+    const first = await frame(true);
+    check(
+      'неразложенный штатный блок не оставляет нас без рамки',
+      first.framed && first.width === normal.width && first.height === normal.height,
+      `${first.width}×${first.height} против обычных ${normal.width}×${normal.height}`
+    );
+    check(
+      'оформление берётся у соседней кнопки: фон и скругление на месте',
+      first.radius === normal.radius && first.opaque === normal.opaque,
+      `радиус ${first.radius}, фон ${first.opaque}`
+    );
+    check(
+      'скругление в пикселях, а не в процентах — иначе развёрнутый блок эллипс',
+      /^\d+(\.\d+)?px$/.test(first.radius),
+      first.radius
+    );
+  }
+
   // --- якорь остался в строке ---------------------------------------------
   // Снято с живой строки Shorts: скрыты оказались только потомки
   // <volume-controls>, а сам он остался элементом flex-строки. Ширины у него

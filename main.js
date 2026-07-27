@@ -2607,22 +2607,47 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // его скроем: фон там рисует вложенный «скрим», поэтому ищем первый
   // элемент с непрозрачным фоном
   let shortsFrame = null;
+  // Донор оформления, когда сам блок громкости ещё не разложен: соседняя
+  // кнопка той же строки. Размер и фон у них общие — ради них оформление и
+  // снимается.
+  function shortsFrameDonor(el) {
+    const row = el.parentElement;
+    if (!row) return null;
+    for (const sibling of row.children) {
+      if (sibling === el || sibling.contains(el)) continue;
+      if (sibling.getBoundingClientRect().height) return sibling;
+    }
+    return null;
+  }
+
   function captureShortsFrame(el) {
     if (shortsFrame || !el) return;
-    const rect = el.getBoundingClientRect();
+    // На первых кадрах ленты штатный блок громкости бывает ещё нулевой
+    // высоты, а сразу после этого мы его прячем — и снять с него оформление
+    // становится нельзя уже никогда: у скрытого узла высота нулевая всегда.
+    // Раньше первый Shorts в сессии из-за этого выходил без рамки вовсе:
+    // 36×36 без фона и скругления. Со следующей ленты всё вставало на место,
+    // потому что там блок успевал разложиться до скрытия.
+    const donor = el.getBoundingClientRect().height ? el : shortsFrameDonor(el);
+    if (!donor) return;
+    const rect = donor.getBoundingClientRect();
     if (!rect.height) return;
     let painted = null;
-    for (const node of [el, ...el.querySelectorAll('*')]) {
+    for (const node of [donor, ...donor.querySelectorAll('*')]) {
       const s = getComputedStyle(node);
       if (s.display !== 'none' && !isTransparentBg(s.backgroundColor)) {
         painted = s;
         break;
       }
     }
+    const height = Math.round(rect.height);
+    const radius = painted ? painted.borderRadius : height / 2 + 'px';
     shortsFrame = {
       bg: painted ? painted.backgroundColor : 'rgba(0, 0, 0, .6)',
-      radius: painted ? painted.borderRadius : Math.round(rect.height / 2) + 'px',
-      height: Math.round(rect.height),
+      // Скругление в процентах на развёрнутом блоке дало бы эллипс: он шире,
+      // чем выше. Приводим к пикселям — на квадрате это тот же круг.
+      radius: /%/.test(radius) ? height / 2 + 'px' : radius,
+      height,
     };
   }
 
