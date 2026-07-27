@@ -75,6 +75,12 @@
   "useNativeDescription": {
     "message": "Hide the extension slider"
   },
+  "normalizeTitle": {
+    "message": "Normalize video loudness"
+  },
+  "normalizeDescription": {
+    "message": "Bring quiet videos up to a common level"
+  },
   "saveSaved": {
     "message": "Saved"
   },

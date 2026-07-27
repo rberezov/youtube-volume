@@ -43,6 +43,7 @@ assert.deepEqual(
     'autoCollapse',
     'enabled',
     'gamma',
+    'normalizeLoudness',
     'shortsScale',
     'showPercent',
     'sliderScale',

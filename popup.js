@@ -8,6 +8,7 @@ const DEFAULTS = {
   showPercent: true,
   autoCollapse: true,
   useNativeSlider: false,
+  normalizeLoudness: false,
 };
 
 // Строки живут в _locales. Русский текст остаётся в разметке и здесь как
@@ -53,6 +54,7 @@ const $shortsValue = document.getElementById('shortsValue');
 const $useNative = document.getElementById('useNativeSlider');
 const $showPercent = document.getElementById('showPercent');
 const $autoCollapse = document.getElementById('autoCollapse');
+const $normalize = document.getElementById('normalizeLoudness');
 const $saveStatus = document.getElementById('saveStatus');
 const $saveStatusText = document.getElementById('saveStatusText');
 const $reset = document.getElementById('resetSettings');
@@ -65,6 +67,7 @@ const controls = [
   $useNative,
   $showPercent,
   $autoCollapse,
+  $normalize,
 ];
 
 function setRangeProgress(input) {
@@ -100,6 +103,7 @@ function setControls(settings) {
   $useNative.checked = settings.useNativeSlider;
   $showPercent.checked = settings.showPercent;
   $autoCollapse.checked = settings.autoCollapse;
+  $normalize.checked = settings.normalizeLoudness;
 }
 
 function values() {
@@ -111,6 +115,7 @@ function values() {
     useNativeSlider: $useNative.checked,
     showPercent: $showPercent.checked,
     autoCollapse: $autoCollapse.checked,
+    normalizeLoudness: $normalize.checked,
   };
 }
 

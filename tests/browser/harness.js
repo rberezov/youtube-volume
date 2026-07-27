@@ -31,6 +31,7 @@ const DEFAULT_SETTINGS = {
   showPercent: true,
   autoCollapse: true,
   useNativeSlider: false,
+  normalizeLoudness: false,
 };
 
 // Браузерные тесты меряют и щупают развёрнутый блок, поэтому по умолчанию

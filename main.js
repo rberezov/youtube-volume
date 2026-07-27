@@ -85,6 +85,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     showPercent: true,      // подпись с процентами рядом с ползунком
     autoCollapse: true,     // сворачивать шкалу, когда курсор не на ней
     useNativeSlider: false, // не строить свою шкалу — оставить штатную
+    normalizeLoudness: false, // подтягивать тихие ролики к общему уровню
   };
   const EARLY_HIDE_CLASS = 'ytev-native-volume-hidden';
   const EARLY_HIDE_MANAGED_CLASS = 'ytev-native-volume-managed';
@@ -125,7 +126,13 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   function applySettings(value) {
     if (!value || typeof value !== 'object') return;
-    for (const key of ['enabled', 'showPercent', 'autoCollapse', 'useNativeSlider']) {
+    for (const key of [
+      'enabled',
+      'showPercent',
+      'autoCollapse',
+      'useNativeSlider',
+      'normalizeLoudness',
+    ]) {
       if (typeof value[key] === 'boolean') SETTINGS[key] = value[key];
     }
     const gamma = Number(value.gamma);
@@ -566,7 +573,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const expectedReal = toReal(preferredVolume);
     const node = audio.nodes.get(video);
     const actualReal = node ? node.target : Number(nativeDesc.get.call(video));
-    const expectedOutput = video.muted ? 0 : expectedReal;
+    const expectedOutput = node
+      ? outputGain(video, expectedReal)
+      : video.muted
+        ? 0
+        : expectedReal;
     if (
       !Number.isFinite(actualReal) ||
       Math.abs(actualReal - expectedOutput) > VOLUME_EPSILON
@@ -592,6 +603,78 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     changed = true;
     return changed;
   }
+
+  /* ------------------------------------------------------------------ *
+   * 1a-bis. Выравнивание громкости роликов
+   *
+   * YouTube кладёт в ответ плеера loudnessDb — насколько ролик громче
+   * своей цели нормализации. Громкие он приглушает сам, умножая громкость
+   * на 10^(-loudnessDb/20). Тихие не подтягивает: управляет он только
+   * video.volume, а тот выше единицы не поднимается — поэтому лекция,
+   * записанная на петличку, так и остаётся тихой. У нас усилитель Web
+   * Audio, и недостающее мы можем добрать сами.
+   *
+   * Добираем осторожно: не больше 6дБ и только нехватку. Это сознательно
+   * консервативно — у материала, который на N дБ тише цели, обычно есть
+   * примерно столько же запаса до пика, поэтому лимитер (он добавил бы
+   * задержку и рассинхрон с картинкой) не нужен.
+   * ------------------------------------------------------------------ */
+
+  const MAX_BOOST_DB = 6;
+  let loudnessBoost = 1;
+  let loudnessVideoId = '';
+
+  function readLoudnessDb(player) {
+    if (!player || typeof player.getPlayerResponse !== 'function') return null;
+    try {
+      const response = player.getPlayerResponse();
+      const config =
+        response && response.playerConfig && response.playerConfig.audioConfig;
+      const db = Number(config && config.loudnessDb);
+      return Number.isFinite(db) ? db : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function currentVideoId(player) {
+    try {
+      const data =
+        player && typeof player.getVideoData === 'function' ? player.getVideoData() : null;
+      return data && data.video_id ? String(data.video_id) : '';
+    } catch {
+      return '';
+    }
+  }
+
+  function refreshLoudness() {
+    if (!SETTINGS.normalizeLoudness) {
+      loudnessVideoId = '';
+      if (loudnessBoost !== 1) {
+        loudnessBoost = 1;
+        reapplyCurve();
+      }
+      return;
+    }
+    const player = getPlayer();
+    const db = readLoudnessDb(player);
+    // Ответ плеера приходит не сразу. Пока его нет, компенсацию не трогаем:
+    // скачок усиления в середине ролика слышнее, чем недобранные децибелы
+    // в первые доли секунды.
+    if (db === null) return;
+    const id = currentVideoId(player);
+    if (id && id === loudnessVideoId) return;
+    loudnessVideoId = id;
+    const boostDb = db < 0 ? Math.min(MAX_BOOST_DB, -db) : 0;
+    const next = Math.pow(10, boostDb / 20);
+    if (Math.abs(next - loudnessBoost) < 1e-6) return;
+    loudnessBoost = next;
+    reapplyCurve(); // через setTargetAtTime, поэтому без щелчка
+  }
+
+  // Итоговое усиление в графе. Компенсация живёт только здесь: запасной
+  // путь пишет прямо в video.volume, а он выше единицы не поднимается.
+  const outputGain = (el, real) => (el.muted ? 0 : real * loudnessBoost);
 
   /* ------------------------------------------------------------------ *
    * 1b. Регулировка через Web Audio — главное средство против треска
@@ -662,7 +745,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     try {
       const src = audio.ctx.createMediaElementSource(el);
       const gain = audio.ctx.createGain();
-      gain.gain.value = toReal(logicalOf(el));
+      gain.gain.value = outputGain(el, toReal(logicalOf(el)));
       src.connect(gain).connect(audio.ctx.destination);
       const node = {
         src,
@@ -768,7 +851,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   function applyReal(el, real) {
     const node = audioGraph(el);
     if (node) {
-      const target = el.muted ? 0 : real;
+      const target = outputGain(el, real);
       node.target = target;
       // 15мс — «мгновенно на слух», но без щелчка
       node.gain.gain.setTargetAtTime(target, audio.ctx.currentTime, 0.015);
@@ -886,6 +969,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       preloadState = null;
     }
     cachePreferredState();
+    refreshLoudness(); // сам позовёт reapplyCurve, если компенсация изменилась
     reapplyCurve();
     bindVideo();
     ensureUI(); // включение/выключение своей шкалы должно срабатывать сразу
@@ -1685,6 +1769,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // лента приходит со своим <video>, и именно на первых кадрах YouTube
     // успевает выставить mute до того, как мы восстановим состояние.
     mutedGuardUntil = Date.now() + MUTED_GUARD_MS;
+    // Новый ролик — новый уровень: заново читаем его из ответа плеера.
+    loudnessVideoId = '';
+    refreshLoudness();
     const current = Number(logicalOf(video));
     if (!validVolume(preferredVolume) && validVolume(current)) {
       rememberVolume(current);
@@ -2328,6 +2415,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     }
     bindVideo();
     ensureUI();
+    refreshLoudness(); // ответ плеера приходит позже, чем появляется <video>
   }, 1000);
   const prepareForNavigation = () => {
     if (!SETTINGS.useNativeSlider) {

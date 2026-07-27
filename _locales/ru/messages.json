@@ -75,6 +75,12 @@
   "useNativeDescription": {
     "message": "Скрыть ползунок расширения"
   },
+  "normalizeTitle": {
+    "message": "Выравнивать громкость роликов"
+  },
+  "normalizeDescription": {
+    "message": "Подтягивать тихие ролики к общему уровню"
+  },
   "saveSaved": {
     "message": "Сохранено"
   },

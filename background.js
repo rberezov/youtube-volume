@@ -12,6 +12,7 @@ const DEFAULTS = {
   showPercent: true,
   autoCollapse: true,
   useNativeSlider: false,
+  normalizeLoudness: false,
 };
 
 function allowedSender(sender) {
