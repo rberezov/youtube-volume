@@ -95,6 +95,67 @@ run('dom-churn: восстановление после перестройки �
     await page.close();
   }
 
+  // --- 2b. Плеер отдаёт объект с бросающим геттером -----------------------
+  // getPlayerResponse() возвращает объект страницы: и вызов, и чтение его
+  // свойств могут бросить. bindVideo() читает уровень ДО восстановления
+  // сохранённой громкости, поэтому исключение оттуда оставило бы новый
+  // <video> с громкостью YouTube и без наших слушателей.
+  {
+    const page = await openPage(browser, {
+      // Разбор ответа плеера исполняется только при включённом выравнивании.
+      withMain: { normalizeLoudness: true },
+      errors,
+      before: async (target) => {
+        await target.evaluate(() => {
+          const player = document.getElementById('movie_player');
+          player.getVideoData = () => ({ video_id: 'hostile' });
+          player.getDrcState = () => 1;
+          player.getPlayerResponse = () => ({
+            get videoDetails() {
+              throw new Error('видеодетали недоступны');
+            },
+          });
+          // Строка Shorts тоже может огрызнуться на чтение служебных полей.
+          const controls = document.createElement('ytd-shorts-player-controls');
+          Object.defineProperty(controls, 'polymerController', {
+            get() {
+              throw new Error('контроллер недоступен');
+            },
+          });
+          document.body.appendChild(controls);
+        });
+      },
+    });
+
+    check(
+      'блок построен, несмотря на бросающие геттеры',
+      (await hasBox(page)) === 1,
+      `блоков: ${await hasBox(page)}`
+    );
+
+    await page.evaluate(() => {
+      const old = document.querySelector('video');
+      const fresh = document.createElement('video');
+      fresh.style.cssText = 'width:100%;height:120px;display:block';
+      old.replaceWith(fresh);
+    });
+    let applied = true;
+    try {
+      await waitFor(async () => (await videoVolume(page)) === EXPECTED, {
+        timeout: 4000,
+        what: 'применения громкости при бросающем ответе плеера',
+      });
+    } catch {
+      applied = false;
+    }
+    check(
+      'громкость всё равно применяется к новому <video>',
+      applied,
+      `фактическая=${await videoVolume(page)} против ${EXPECTED}`
+    );
+    await page.close();
+  }
+
   // --- 3. Плеер появился позже расширения --------------------------------
   // Холодный старт на медленном канале: main.js уже работает, а плеера ещё
   // нет. Никакого события об этом не приходит — только мутация DOM.

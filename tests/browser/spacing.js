@@ -78,6 +78,42 @@ run('spacing: зазор до соседней кнопки', async ({ browser, 
     );
   }
 
+  // --- сосед без фона, но со значком внутри -------------------------------
+  // Спуск к вложенной плашке задуман для `.ytp-time-display`, у которой фона
+  // нет. Но у штатной кнопки фон тоже `none`, а внутри — svg 36px в кнопке
+  // 48px: спускаясь к нему, мы мерили бы до глифа и притягивали блок ближе
+  // границы кнопки. Равнение идёт по границам объектов, не по глифам.
+  {
+    const page = await openPage(browser, { withMain: { autoCollapse: true }, errors });
+    const gap = await page.evaluate(async () => {
+      const box = document.querySelector('.ytev-box');
+      // Ставим перед блоком прозрачную кнопку со значком внутри — так
+      // выглядит `.ytp-play-button` на живой странице.
+      const button = document.createElement('button');
+      button.className = 'ytp-play-button';
+      button.style.cssText =
+        'background: none; border: 0; padding: 0; margin: 0; width: 48px; height: 48px;' +
+        ' display: inline-flex; align-items: center; justify-content: center;';
+      const glyph = document.createElement('span');
+      glyph.style.cssText = 'width: 36px; height: 36px; display: block;';
+      button.appendChild(glyph);
+      box.before(button);
+      window.dispatchEvent(new Event('resize'));
+      await new Promise((done) => setTimeout(done, 250));
+      const rect = button.getBoundingClientRect();
+      return {
+        toButton: +(box.getBoundingClientRect().left - rect.right).toFixed(1),
+        toGlyph: +(box.getBoundingClientRect().left - glyph.getBoundingClientRect().right).toFixed(1),
+      };
+    });
+    await page.close();
+    check(
+      'зазор считается до границы кнопки, а не до её значка',
+      Math.abs(gap.toButton - EXPECTED) <= 1,
+      `до кнопки ${gap.toButton}px, до значка ${gap.toGlyph}px`
+    );
+  }
+
   // --- таймкод справа -----------------------------------------------------
   // В живой строке `.ytp-time-display` фона не рисует: таймкод лежит во
   // вложенной плашке с собственным отступом. Зазор до неё складывался из

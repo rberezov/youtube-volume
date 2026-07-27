@@ -555,11 +555,15 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     (e) => {
       const target = e.target instanceof Element ? e.target : null;
       if (!target) return;
+      // Ветки взаимоисключающие, и это существенно: штатная кнопка звука
+      // лежит ВНУТРИ .ytp-volume-area, которую ищет nativeVolumeControl().
+      // Пока проверки шли подряд, второе условие тут же заново открывало
+      // окно громкости, закрытое первым, — и запись, которую делает mute()
+      // плеера, снова принималась за осознанный выбор.
       if (target.closest('.ytp-mute-button, .ytev-mute')) {
         markMutedIntent(5000);
         dropVolumeIntent();
-      }
-      if (nativeVolumeControl(target) || target.closest('.ytev-slider')) {
+      } else if (nativeVolumeControl(target) || target.closest('.ytev-slider')) {
         markVolumeIntent(5000);
         scheduleTrustedNativeVolume(target);
       }
@@ -783,12 +787,20 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       preference,
     };
     if (!player || typeof player.getPlayerResponse !== 'function') return unknown;
-    let response = null;
+    // Ответ плеера — объект страницы: и вызов, и последующее чтение свойств
+    // может бросить (геттеры там чужие). Разбор целиком под try, потому что
+    // bindVideo() зовёт refreshLoudness() ДО восстановления сохранённой
+    // громкости: исключение отсюда оставило бы новый <video> с громкостью
+    // YouTube и без наших слушателей.
     try {
-      response = player.getPlayerResponse();
+      return readResponse(player, id, unknown, stats, state, preference);
     } catch {
       return unknown;
     }
+  }
+
+  function readResponse(player, id, unknown, stats, state, preference) {
+    const response = player.getPlayerResponse();
     if (!response) return unknown;
     // Сразу после перехода плеер ещё какое-то время отдаёт ответ предыдущего
     // ролика. Снимок от чужого ролика решением не считается.
@@ -846,6 +858,14 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       return;
     }
     const snap = readLoudness(getPlayer());
+    // Ролик сменился — прежнее решение недействительно, и ждать полного
+    // снимка нельзя. bindVideo() сюда не поможет: он выходит первой строкой,
+    // если <video> тот же, а YouTube переиспользует элемент для следующего
+    // ролика. Без этого усиление предыдущего действовало бы всё время, пока
+    // снимок нового неполон, — то самое «громче, чем нужно».
+    if (snap.id && loudnessKey && !loudnessKey.startsWith(snap.id + '|')) {
+      resetLoudness();
+    }
     if (!snap.complete) return;
     // В ключ входит и признак DRC: «стабильную громкость» можно включить
     // и выключить прямо во время ролика, и решение тогда меняется.
@@ -1870,6 +1890,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     for (const child of el.children) {
       const cr = child.getBoundingClientRect();
       if (cr.width <= 0.5) continue;
+      // Спускаемся только к тому, кто сам рисует плашку. Иначе у прозрачной
+      // кнопки (у .ytp-button фон none) мы бы взяли грань её значка: svg 36px
+      // внутри кнопки 48px, и блок притягивался бы на шесть пикселей ближе
+      // границы кнопки — а равнение идёт по границам объектов, не по глифам.
+      if (isTransparentBg(getComputedStyle(child).backgroundColor)) continue;
       // Обращённую к нам грань берём у вложенной плашки, остальное неважно.
       return back
         ? { left: rect.left, right: Math.max(cr.right, rect.left) }
@@ -2530,10 +2555,15 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     if (!controls || !controls.isConnected) return false;
     if (!controls.querySelector('#left-controls > yt-button-shape')) return false;
     if (!controls.querySelector('#right-controls > #menu-button')) return false;
-    const controller = controls.polymerController;
-    if (controller && (controller.didCallReady === false || controller.isAttached === false)) {
-      return false;
-    }
+    // polymerController и его поля принадлежат странице: чтение может
+    // бросить. Исключение отсюда сломало бы ensureUI(), то есть сборку
+    // интерфейса целиком, поэтому непрочитанное считаем «подтверждения нет».
+    try {
+      const controller = controls.polymerController;
+      if (controller && (controller.didCallReady === false || controller.isAttached === false)) {
+        return false;
+      }
+    } catch {}
     return true;
   }
 

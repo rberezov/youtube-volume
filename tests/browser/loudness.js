@@ -106,7 +106,9 @@ function installPlayer(spec, tone) {
     formats.push(variant({ isDrc: true, loudnessDb: 0 }));
     formats.push(variant({ isVb: true, loudnessDb: -4.24 }));
   }
-  player.getVideoData = () => ({ video_id: spec.id });
+  // Оба значения можно подменить на лету: YouTube переиспользует один
+  // <video> для следующего ролика, и тест это воспроизводит.
+  player.getVideoData = () => ({ video_id: window.__id != null ? window.__id : spec.id });
   player.getPlayerResponse = () => ({
     videoDetails: { videoId: spec.responseId || spec.id },
     playerConfig: {
@@ -118,6 +120,7 @@ function installPlayer(spec, tone) {
   // обязано считать неизвестным.
   if (!spec.noDrcState) {
     player.getDrcState = () => {
+      if (window.__state != null) return window.__state;
       if (drcStateWhen) return drcStateWhen() ? 0 : 1;
       return spec.drcState != null ? spec.drcState : spec.offersDrc && spec.drcNow ? 0 : 1;
     };
@@ -467,6 +470,32 @@ run('loudness: компенсация тихих роликов', async ({ brows
       'поздняя статистика: решение сразу взято у плеера',
       report.drc === true && report.boostDb === 0 && report.source === 'drcState',
       JSON.stringify(report)
+    );
+  }
+
+  // Смена ролика на том же <video>: bindVideo() выходит первой строкой, если
+  // элемент тот же, а yt-navigate-start бывает не при каждом переходе. Пока
+  // снимок нового ролика неполон, усиление прежнего продолжало действовать —
+  // ровно тот исход «громче, чем нужно», ради которого всё и делалось.
+  {
+    const page = await play({ id: 'first', db: -6, statsSilent: true });
+    await page.waitForTimeout(1200);
+    const before = await page.evaluate(
+      () => window[Symbol.for('ytev.main.instance.v2')].loudness().boostDb
+    );
+    check('на первом ролике усиление есть', Math.abs(before - 6) < 0.01, `${before}дБ`);
+
+    const after = await page.evaluate(() => {
+      window.__id = 'second'; // тот же элемент, другой ролик
+      window.__state = 2; // снимок неполон: состояние дорожки неизвестно
+      document.querySelector('video').dispatchEvent(new Event('durationchange'));
+      return window[Symbol.for('ytev.main.instance.v2')].loudness();
+    });
+    await page.close();
+    check(
+      'смена ролика на том же <video> снимает усиление сразу',
+      after.boostDb === 0 && after.complete === false,
+      JSON.stringify(after)
     );
   }
 

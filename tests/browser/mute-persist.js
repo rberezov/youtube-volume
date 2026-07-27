@@ -124,4 +124,60 @@ run('mute-persist: возврат уровня с нуля и его запис�
     );
     await zeroing.close();
   }
+
+  // Та же ловушка, но через ШТАТНУЮ кнопку YouTube. Она лежит внутри
+  // .ytp-volume-area, а её ищет проверка «это регулятор громкости» — и пока
+  // проверки шли подряд, вторая тут же заново открывала окно, закрытое
+  // первой. В режиме штатной шкалы эта кнопка единственная доступная.
+  {
+    const native = await openPage(browser, {
+      withBridge: true,
+      playerWidth: 1280,
+      errors,
+      before: async (target) => {
+        await target.evaluate(() => {
+          const player = document.getElementById('movie_player');
+          player.mute = () => {
+            const video = player.querySelector('video');
+            player._restore = video.volume;
+            video.volume = 0;
+            video.muted = true;
+          };
+          // Штатная кнопка звука должна и правда глушить, как у YouTube.
+          document.querySelector('.ytp-mute-button').addEventListener('click', () => {
+            player.mute();
+          });
+        });
+      },
+    });
+
+    // Штатную кнопку мы прячем своим CSS — для клика возвращаем её видимой.
+    // Проверяется не она сама, а разбор жеста в обработчике pointerdown.
+    await native.addStyleTag({
+      content:
+        // Донорскую «пилюлю» расширение прячет инлайновым display: none —
+        // правило с !important из таблицы стилей его перебивает.
+        'html #movie_player .pill { display: flex !important; }' +
+        'html #movie_player .ytp-volume-area,' +
+        'html #movie_player .ytp-mute-button {' +
+        ' display: inline-flex !important; visibility: visible !important; }',
+    });
+    await dragSlider(native, 0.6);
+    await native.waitForTimeout(400);
+    const chosen = await native.evaluate(() =>
+      +Number(document.querySelector('video').volume).toFixed(3)
+    );
+    check('громкость выставлена перед штатным mute', chosen > 0.1, `${chosen}`);
+
+    await native.evaluate(() => (window.__writes.length = 0));
+    await native.click('.ytp-mute-button');
+    await native.waitForTimeout(700);
+    const writes = await native.evaluate(() => window.__writes.slice());
+    check(
+      'штатная кнопка mute не записывает ноль как выбранную громкость',
+      !writes.some((write) => write.savedVolume === 0),
+      JSON.stringify(writes)
+    );
+    await native.close();
+  }
 });
