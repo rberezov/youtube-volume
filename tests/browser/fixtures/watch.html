@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; background: #111; font-family: Roboto, Arial, sans-serif; }
+  #movie_player { position: relative; background: #000; }
+  .ytp-chrome-controls { display: flex; height: 56px; width: 100%; box-sizing: border-box; padding: 0 12px; align-items: center; }
+  #movie_player.ytp-big-mode .ytp-chrome-controls { height: 68px; }
+  .ytp-left-controls { display: flex; align-items: center; flex: 1 1 auto; min-width: 0; }
+  .ytp-right-controls { display: flex; align-items: center; flex: 0 0 auto; }
+  .pill { display: flex; align-items: center; background: rgba(28,28,28,.85); border-radius: 24px; padding: 0 10px; margin-right: 8px; height: 44px; overflow: visible; }
+  /* симуляция YouTube: ширина пилюли задана скриптом под её собственное
+     содержимое и не растягивается под чужие вставки */
+  .left-pill { width: 70px; flex: 0 0 auto; }
+  #movie_player.ytp-big-mode .pill { height: 54px; }
+  .ytp-volume-area { display: flex; align-items: center; }
+  /* симуляция YouTube: при наведении область громкости расширяется под
+     выезжающий штатный ползунок (в тесте класс вместо :hover) */
+  .ytp-volume-area.yt-hover { width: 220px; }
+  .btn { width: 40px; height: 44px; color: #fff; background: none; border: none; display: flex; align-items: center; justify-content: center; }
+  .ytp-mute-button { height: 64px; position: relative; }
+  .ytp-mute-button svg { position: absolute; top: 30px; left: 4px; width: 24px; height: 24px; fill: #fff; }
+  #movie_player.ytp-big-mode .ytp-mute-button { height: 78px; }
+  #movie_player.ytp-big-mode .btn { width: 54px; height: 54px; font-size: 20px; }
+  .ytp-chapter-container { color:#fff; font-size:13px; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ytp-time-display { display: flex; align-items: center; height: 56px; color: #fff; font-size: 13px; white-space: nowrap; background: rgba(28,28,28,.4); }
+  #movie_player.ytp-big-mode .ytp-time-display { font-size: 17px; height: 68px; }
+  .tpill { display: flex; align-items: center; height: 40px; padding: 0 12px; background: rgba(28,28,28,.85); border-radius: 20px; }
+  #movie_player.ytp-big-mode .tpill { height: 50px; border-radius: 25px; }
+  .ytp-volume-panel { width: 52px; height: 44px; background: #333; }
+  video { width: 100%; display: block; height: 120px; object-fit: cover; background: #6b4a2f; }
+</style>
+</head>
+<body>
+<div id="movie_player">
+  <video></video>
+  <div class="ytp-chrome-controls">
+    <div class="ytp-left-controls">
+      <div class="pill nav-pill"><button class="btn">P</button></div>
+      <div class="pill left-pill">
+        <div class="ytp-volume-area">
+          <button class="btn ytp-mute-button"><svg viewBox="0 0 36 36" height="100%" width="100%"><use class="ytp-svg-shadow" xlink:href="#ytp-id-15"></use><path class="ytp-svg-fill" id="ytp-id-15" d="M8,21 L12,21 L17,26 L17,10 Z"></path></svg></button>
+          <div class="ytp-volume-panel"></div>
+        </div>
+      </div>
+      <div class="ytp-time-display"><span class="tpill">1:23 / 4:56</span></div>
+      <div class="ytp-chapter-container"></div>
+    </div>
+    <div class="ytp-right-controls pill">
+      <button class="btn">CC</button>
+      <button class="btn">S</button>
+      <button class="btn">T</button>
+      <button class="btn">F</button>
+    </div>
+  </div>
+</div>
+<script>
+  // ?flat — старая плоская структура без «пилюль»
+  if (location.search.includes('flat')) {
+    document.querySelectorAll('.pill').forEach((p) => {
+      if (p.classList.contains('ytp-right-controls')) {
+        p.classList.remove('pill');
+      } else {
+        p.replaceWith(...p.childNodes);
+      }
+    });
+    const tp = document.querySelector('.tpill');
+    tp.replaceWith(...tp.childNodes);
+    document.querySelector('.ytp-time-display').style.background = 'none';
+    document.querySelector('.ytp-mute-button').style.height = '44px';
+  }
+  // мини-заглушка API плеера
+  const p = document.getElementById('movie_player');
+  p.setVolume = (v) => { p._v = v; };
+  p.unMute = () => { p.querySelector('video').muted = false; };
+  p.mute = () => { p.querySelector('video').muted = true; };
+  // как YouTube: штатная кнопка перерисовывает значок по состоянию звука
+  const nativePath = document.querySelector('.ytp-mute-button path');
+  const video = p.querySelector('video');
+  const NATIVE_LOUD = 'M8,21 L12,21 L17,26 L17,10 Z';
+  const NATIVE_MUTED = 'M9,9 L26,26 L8,21 Z';
+  const syncNative = () => {
+    if (location.search.includes('stale')) return; // имитация «застывшего» значка
+    nativePath.setAttribute('d',
+      (video.muted || video.volume === 0) ? NATIVE_MUTED : NATIVE_LOUD);
+  };
+  video.addEventListener('volumechange', syncNative);
+  syncNative();
+</script>
+</body>
+</html>
