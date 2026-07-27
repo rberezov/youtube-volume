@@ -68,9 +68,6 @@ function createReporter(title) {
       failures += 1;
       console.log(` СБОЙ  ${reason}`);
     },
-    get failures() {
-      return failures;
-    },
     finish() {
       console.log(failures ? `\nСБОЕВ: ${failures}` : '\nвсё зелено');
       return failures;
@@ -146,7 +143,6 @@ const PAGE_URL = {
  * @param {object} options
  * @param {'watch'|'shorts'} options.page       какой макет поднять
  * @param {boolean} options.withBridge          внедрить bridge.js и мок chrome.*
- * @param {boolean} options.withPreload         внедрить preload.js
  * @param {boolean|object} options.withMain     внедрить main.js (объект — настройки)
  * @param {number} options.playerWidth          ширина плеера в px
  * @param {(page: import('playwright').Page) => Promise<void>} options.before
@@ -155,17 +151,15 @@ async function openPage(browser, options = {}) {
   const {
     page: kind = 'watch',
     withBridge = false,
-    withPreload = false,
     withMain = true,
     playerWidth = null,
-    viewport = { width: 1400, height: 800 },
     settings,
     state,
     before,
     errors,
   } = options;
 
-  const page = await browser.newPage({ viewport });
+  const page = await browser.newPage({ viewport: { width: 1400, height: 800 } });
   if (errors) {
     page.on('pageerror', (error) => errors.push(error.message));
   }
@@ -175,7 +169,6 @@ async function openPage(browser, options = {}) {
   );
   await page.goto(PAGE_URL[kind]);
   if (before) await before(page);
-  if (withPreload) await page.addScriptTag({ content: readSource('preload.js') });
   if (withBridge) await page.addScriptTag({ content: readSource('bridge.js') });
   if (withMain) {
     // Когда рядом поднят bridge, канал и секрет берём у него — в бою их
@@ -240,7 +233,7 @@ function run(title, body) {
   (async () => {
     const browser = await chromium.launch();
     try {
-      await body({ browser, reporter, errors, check: reporter.check });
+      await body({ browser, reporter, errors });
     } finally {
       await browser.close();
     }
@@ -258,9 +251,6 @@ function run(title, body) {
 }
 
 module.exports = {
-  CHANNEL,
-  DEFAULT_SETTINGS,
-  SECRET,
   TEST_SETTINGS,
   bootScript,
   chromeStub,

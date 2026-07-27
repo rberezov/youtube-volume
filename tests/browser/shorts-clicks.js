@@ -11,7 +11,7 @@
 // указателя с ролика.
 
 const path = require('node:path');
-const { bootScript, loadPlaywright, createReporter, readSource } = require('./harness');
+const { bootScript, createReporter, loadPlaywright } = require('./harness');
 
 const SHORTS = require(path.join(__dirname, 'fixtures', 'shorts.js'));
 

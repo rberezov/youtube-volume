@@ -8,8 +8,6 @@ const listeners = new Map();
 const posted = [];
 const runtimeMessages = [];
 const saved = [];
-let localVolume = 0.37;
-let localMuted = false;
 let now = 1000;
 let onStorageChanged;
 const activeVideo = {
@@ -126,8 +124,6 @@ const chromeMock = {
     local: {
       set(value, callback) {
         saved.push(value);
-        if ('savedVolume' in value) localVolume = value.savedVolume;
-        if ('savedMuted' in value) localMuted = value.savedMuted;
         callback();
       },
     },
