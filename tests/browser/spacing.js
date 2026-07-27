@@ -39,6 +39,45 @@ run('spacing: зазор до соседней кнопки', async ({ browser, 
     );
   }
 
+  // --- пустая распорка между нами и кнопкой ------------------------------
+  // В живой строке плеера перед нашим блоком стоит <span class="ytp-volume-area">:
+  // после скрытия громкости он пустой и нулевой ширины, но в DOM остаётся.
+  // Считать отступ по «ближайшему отрисованному соседу» из-за него нельзя —
+  // нужно идти до первого, кто реально занимает место.
+  {
+    const page = await openPage(browser, { withMain: { autoCollapse: true }, errors });
+    // Ставим распорку вплотную перед блоком — так она и стоит в живой
+    // строке — и просим пересчитать раскладку.
+    await page.evaluate(() => {
+      const box = document.querySelector('.ytev-box');
+      const spacer = document.createElement('span');
+      spacer.className = 'ytp-volume-area';
+      spacer.style.display = 'flex';
+      box.before(spacer);
+      window.dispatchEvent(new Event('resize'));
+    });
+    await page.waitForTimeout(300);
+    const gap = await page.evaluate(() => {
+      const box = document.querySelector('.ytev-box');
+      let prev = box.previousElementSibling;
+      while (prev && prev.getBoundingClientRect().width <= 0.5) {
+        prev = prev.previousElementSibling;
+      }
+      return {
+        value: +(box.getBoundingClientRect().left - prev.getBoundingClientRect().right).toFixed(1),
+        spacerIsSibling: !!box.previousElementSibling &&
+          box.previousElementSibling.classList.contains('ytp-volume-area'),
+        ours: getComputedStyle(box).marginLeft,
+      };
+    });
+    await page.close();
+    check(
+      'пустая распорка перед блоком не удваивает зазор',
+      Math.abs(gap.value - EXPECTED) <= 1,
+      `${gap.value}px, распорка ${gap.spacerIsSibling ? 'на месте' : 'не встала'}, мы ${gap.ours}`
+    );
+  }
+
   // --- Shorts ------------------------------------------------------------
   // Штатный блок громкости, на место которого мы встаём, обязан уйти из
   // потока целиком. Нулевой по размеру, но видимый элемент остаётся
@@ -74,6 +113,29 @@ run('spacing: зазор до соседней кнопки', async ({ browser, 
     await page.close();
     return result;
   };
+
+  // --- тень как у штатных контролов --------------------------------------
+  // Светлый значок на светлом кадре без тени теряется, у YouTube она есть
+  // и на значках, и на дорожке, и на подписи времени.
+  {
+    const page = await openPage(browser, { withMain: { autoCollapse: false }, errors });
+    const shadow = await page.evaluate(() => ({
+      icon: getComputedStyle(document.querySelector('.ytev-mute svg')).filter,
+      slider: getComputedStyle(document.querySelector('.ytev-slider')).filter,
+      label: getComputedStyle(document.querySelector('.ytev-label')).textShadow,
+    }));
+    await page.close();
+    check(
+      'у значка и шкалы есть тень',
+      /drop-shadow/.test(shadow.icon) && /drop-shadow/.test(shadow.slider),
+      `значок «${shadow.icon}», шкала «${shadow.slider}»`
+    );
+    check(
+      'у процентов тень тоже есть',
+      /rgba?\(/.test(shadow.label) && shadow.label !== 'none',
+      `«${shadow.label}»`
+    );
+  }
 
   const plain = await shortsGap(false);
   check(

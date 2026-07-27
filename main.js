@@ -1248,6 +1248,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
          последний знак подрезался. */
       --ytev-pct: 2.7em;
       --ytev-gap: 0px;
+      /* Тень как у штатных контролов YouTube: мягкая, чуть вниз. Она нужна
+         не для красоты — светлый значок на светлом кадре без неё теряется. */
+      --ytev-shadow: drop-shadow(0 1px 2px rgb(0 0 0 / 50%));
       display: flex;
       align-items: center;
       align-self: center;
@@ -1356,6 +1359,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       pointer-events: auto;
     }
     .ytev-box:not(.ytev-framed) .ytev-mute { height: 36px; }
+    .ytev-mute svg,
+    .ytev-slider { filter: var(--ytev-shadow); }
+    .ytev-label { text-shadow: 0 1px 2px rgb(0 0 0 / 50%); }
     .ytev-mute svg {
       /* У штатной кнопки YouTube SVG 24×24 внутри зоны 36×36 — это 66.7%.
          Наша рамка ниже штатной пилюли, и в ней тот же значок смотрелся
@@ -1838,30 +1844,40 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // Копирование с живого элемента даёт точное совпадение размеров и
   // оформления в любой версии интерфейса и теме; в старом интерфейсе
   // фоновых плашек нет — блок остаётся прозрачным.
-  // Сколько нам добавить с одной стороны, чтобы суммарный зазор с соседом
-  // получился ровно edgeGap. `side` — свойство соседа, обращённое к нам.
-  function edgeMargin(side) {
-    if (!ui) return 0;
-    // Ближайший сосед может быть спрятанным штатным блоком: он места не
-    // занимает, и его поля ни на что не влияют — идём до первого видимого.
-    const back = side === 'marginRight';
-    let neighbour = back ? ui.box.previousElementSibling : ui.box.nextElementSibling;
-    while (neighbour && !neighbour.getClientRects().length) {
-      neighbour = back ? neighbour.previousElementSibling : neighbour.nextElementSibling;
+  // Ближайший сосед, который реально занимает место. Спрятанный штатный
+  // блок и пустые распорки вроде <span class="ytp-volume-area"> ширины не
+  // имеют, но в DOM стоят между нами и настоящей кнопкой.
+  function renderedNeighbour(back) {
+    let el = back ? ui.box.previousElementSibling : ui.box.nextElementSibling;
+    while (el) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0.5) return rect;
+      el = back ? el.previousElementSibling : el.nextElementSibling;
     }
-    let theirs = 0;
-    if (neighbour) {
-      const value = parseFloat(getComputedStyle(neighbour)[side]);
-      if (Number.isFinite(value)) theirs = value;
-    }
-    const row = ui.box.parentElement;
-    if (row) {
-      const gap = parseFloat(getComputedStyle(row).columnGap);
-      if (Number.isFinite(gap)) theirs = Math.max(theirs, gap);
-    }
-    // edgeGap считается от высоты плашки и на старой плоской вёрстке может
-    // быть ещё не известен — тогда берём обычный ритм YouTube.
-    return Math.max(0, Math.round((edgeGap || 8) - theirs));
+    return null;
+  }
+
+  /**
+   * Приводит зазоры до соседей к ритму YouTube.
+   *
+   * Считать по чужим полям оказалось нельзя: отступ соседа складывается из
+   * его margin, margin пустых распорок между нами и gap самой строки — и
+   * промахнуться можно на любом из слагаемых. Поэтому меряем фактический
+   * зазор при обнулённых своих полях и добираем ровно недостающее.
+   */
+  function applyEdgeMargins() {
+    if (!ui) return;
+    const st = ui.box.style;
+    const target = edgeGap || 8; // на плоской вёрстке высота ещё не известна
+    st.marginLeft = '0px';
+    st.marginRight = '0px';
+    const box = ui.box.getBoundingClientRect(); // замер после обнуления
+    const before = renderedNeighbour(true);
+    const after = renderedNeighbour(false);
+    const need = (actual) =>
+      (actual == null ? target : Math.max(0, Math.round(target - actual))) + 'px';
+    st.marginLeft = need(before && box.left - before.right);
+    st.marginRight = need(after && after.left - box.right);
   }
 
   function syncFrameStyle() {
@@ -1904,7 +1920,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       st.borderRadius = shortsFrame.radius;
       st.setProperty('--ytev-round', h / 2 + 'px'); // свёрнутый круг
       st.height = h + 'px';
-      st.margin = `0 ${edgeMargin('marginLeft')}px 0 ${edgeMargin('marginRight')}px`;
+      st.marginTop = '0';
+      st.marginBottom = '0';
       st.setProperty('--ytev-pad', pad + 'px');
       st.setProperty('--ytev-hl-inset', shortsInset + 'px');
       st.setProperty(
@@ -1912,6 +1929,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         Math.max(4, Math.round((parseFloat(shortsFrame.radius) || h / 2) - shortsInset)) + 'px'
       );
       st.backdropFilter = '';
+      applyEdgeMargins();
       return;
     }
     const surfaces = [];
@@ -1932,7 +1950,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const st = ui.box.style;
     ui.box.classList.toggle('ytev-framed', !!surface);
     if (!surface) {
-      st.margin = `0 ${edgeMargin('marginLeft')}px 0 ${edgeMargin('marginRight')}px`;
+      st.marginTop = '0';
+      st.marginBottom = '0';
       st.background = '';
       st.borderRadius = '';
       st.height = '';
@@ -1941,17 +1960,14 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       st.removeProperty('--ytev-round');
       st.removeProperty('--ytev-hl-inset');
       st.removeProperty('--ytev-hl-radius');
+      applyEdgeMargins();
       return;
     }
     const s = surface.style;
     const h = Math.round(surface.h);
     if (!edgeGap) edgeGap = Math.max(6, Math.round(h * 0.2));
-    // Свой отступ дополняет чужой, а не прибавляется к нему. У соседних
-    // контролов YouTube есть собственные поля (у «пилюли» это margin-right,
-    // у строк нового интерфейса — gap), и наши восемь пикселей ложились
-    // сверху: между кнопкой воспроизведения и нашим блоком выходило 16px
-    // вместо восьми, вдвое больше, чем между штатными кнопками.
-    st.margin = `0 ${edgeMargin('marginLeft')}px 0 ${edgeMargin('marginRight')}px`;
+    st.marginTop = '0';
+    st.marginBottom = '0';
     st.background = s.backgroundColor;
     st.borderRadius = s.borderRadius;
     st.setProperty('--ytev-round', h / 2 + 'px'); // свёрнутый круг
@@ -1968,6 +1984,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     st.setProperty('--ytev-hl-inset', hlInset + 'px');
     st.setProperty('--ytev-hl-radius', Math.max(4, Math.round(radius - hlInset)) + 'px');
     st.backdropFilter = s.backdropFilter && s.backdropFilter !== 'none' ? s.backdropFilter : '';
+    applyEdgeMargins();
   }
 
   // Свободное место под ползунок: идём от нашего блока вверх до строки
