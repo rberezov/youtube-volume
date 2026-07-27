@@ -210,6 +210,73 @@ run('collapse: форма и длительность сворачивания',
     );
   }
 
+  // --- после клика по кнопке звука блок сворачивается целиком ------------
+  // Обрезка снималась по :focus-within, а после клика фокус остаётся на
+  // кнопке — свёрнутый блок превращался в кружок, из которого торчала шкала
+  // во всю длину поверх соседей. Снимать обрезку можно только под
+  // клавиатурным фокусом.
+  {
+    const clicked = await openPage(browser, {
+      withMain: { autoCollapse: true },
+      errors,
+    });
+    await clicked.hover('.ytev-box');
+    await waitFor(
+      async () => {
+        const state = await clicked.evaluate(() => {
+          const box = document.querySelector('.ytev-box');
+          return {
+            collapsed: box.classList.contains('ytev-collapsed'),
+            animating: box.classList.contains('ytev-animating'),
+          };
+        });
+        return !state.collapsed && !state.animating;
+      },
+      { what: 'разворачивания' }
+    );
+    await clicked.click('.ytev-mute');
+    await clicked.mouse.move(10, 10);
+    await waitFor(
+      async () =>
+        await clicked.evaluate(() => {
+          const box = document.querySelector('.ytev-box');
+          return (
+            box.classList.contains('ytev-collapsed') &&
+            !box.classList.contains('ytev-animating')
+          );
+        }),
+      { timeout: 2000, what: 'сворачивания после клика по кнопке звука' }
+    );
+    const shape = await clicked.evaluate(() => {
+      const boxEl = document.querySelector('.ytev-box');
+      const box = boxEl.getBoundingClientRect();
+      const slot = document.querySelector('.ytev-slot').getBoundingClientRect();
+      // Прямоугольник самого <input> остаётся прежним даже под обрезкой —
+      // он просто не рисуется. Видимую часть показывают ширина шторки и
+      // попадание указателя: hit-test обрезку учитывает.
+      const outside = document.elementFromPoint(box.right + 20, box.top + box.height / 2);
+      return {
+        boxW: Math.round(box.width),
+        boxH: Math.round(box.height),
+        slotW: Math.round(slot.width),
+        ourElementOutside: !!(outside && outside.closest('.ytev-box')),
+        clip: getComputedStyle(document.querySelector('.ytev-slot')).overflow,
+      };
+    });
+    await clicked.close();
+    check(
+      'после клика по кнопке звука блок сворачивается в круг',
+      Math.abs(shape.boxW - shape.boxH) <= 2,
+      `${shape.boxW}×${shape.boxH}`
+    );
+    check(
+      'шкала не торчит из свёрнутого блока',
+      shape.slotW === 0 && !shape.ourElementOutside && shape.clip === 'hidden',
+      `шторка ${shape.slotW}px, обрезка «${shape.clip}», ` +
+        `за рамкой ${shape.ourElementOutside ? 'наш элемент' : 'ничего нашего'}`
+    );
+  }
+
   // --- начало шкалы стоит на месте ---------------------------------------
   // Пока промежуток между значком и шкалой был gap самой рамки, он менялся
   // вместе со сворачиванием — и левый край дорожки уезжал вправо на эти же

@@ -383,6 +383,17 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   const markMutedIntent = (duration = 1200) => {
     mutedIntentUntil = Date.now() + duration;
   };
+  // Выключение звука — не жест громкости. Окно, открытое недавней
+  // регулировкой, нужно закрыть: реализация mute() у плеера может писать в
+  // video.volume, и внутри открытого окна такая запись принималась за
+  // осознанный выбор пользователя — сохранённой громкостью становился ноль.
+  // Снаружи это выглядело так: «поменял громкость, нажал mute — громкость
+  // тоже изменилась». Вне окна та же запись откатывается как служебная.
+  const dropVolumeIntent = () => {
+    volumeIntentUntil = 0;
+    volumeIntentVideo = null;
+    volumeIntentSource = '';
+  };
   const hasVolumeIntent = (video = getVideo()) => {
     if (Date.now() > volumeIntentUntil) return false;
     if (volumeIntentVideo && video !== volumeIntentVideo) return false;
@@ -519,6 +530,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       }
       if (String(e.key).toLowerCase() !== 'm' || e.repeat) return;
       markMutedIntent();
+      dropVolumeIntent();
       const video = getVideo();
       if (video) rememberMuted(!video.muted, true);
     },
@@ -543,7 +555,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     (e) => {
       const target = e.target instanceof Element ? e.target : null;
       if (!target) return;
-      if (target.closest('.ytp-mute-button, .ytev-mute')) markMutedIntent(5000);
+      if (target.closest('.ytp-mute-button, .ytev-mute')) {
+        markMutedIntent(5000);
+        dropVolumeIntent();
+      }
       if (nativeVolumeControl(target) || target.closest('.ytev-slider')) {
         markVolumeIntent(5000);
         scheduleTrustedNativeVolume(target);
@@ -1417,7 +1432,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     }
     /* С клавиатурным фокусом шкала и так раскрыта, обрезать нечего — зато
        иначе обрезалась бы рамка фокуса по бокам. */
-    .ytev-box:focus-within .ytev-slot { overflow: visible; }
+    /* Именно :focus-visible, а не :focus-within: после клика по кнопке
+       звука фокус остаётся на ней, и обрезка снималась бы — свёрнутый блок
+       превращался в кружок, из которого торчала шкала во всю длину. */
+    .ytev-slot:has(:focus-visible) { overflow: visible; }
     .ytev-slot > * { margin-left: var(--ytev-gap); }
     .ytev-box.ytev-mirrored .ytev-slot > * {
       margin-left: 0;
@@ -2644,6 +2662,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       const player = getPlayer();
       const video = getVideo();
       if (!video) return;
+      dropVolumeIntent();
       const silent = video.volume === 0;
       if (video.muted || silent) {
         rememberMuted(false, true);
