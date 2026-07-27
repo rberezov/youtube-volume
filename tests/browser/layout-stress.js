@@ -4,7 +4,7 @@
 // полноэкранный режим, быстрые смены настроек. Ищем разъезд блока за
 // пределы строки управления и потерю регулировки громкости.
 
-const { openPage, run } = require('./harness');
+const { openPage, run, waitFor } = require('./harness');
 
 // Что видно пользователю: влезает ли блок в строку и есть ли чем крутить
 const probe = (page) =>
@@ -95,8 +95,20 @@ run('layout-stress: сужение, глава, полный экран, сме�
   );
   check('с длинной главой громкость регулируема', chapter.controllable);
   await page.evaluate(() => (document.querySelector('.ytp-chapter-container').textContent = ''));
-  await page.waitForTimeout(500);
-  const recovered = await probe(page);
+  // Возврат из отката делает layout(), а его дёргает секундный тик ensureUI.
+  // Фиксированной паузы не хватало: локально ResizeObserver успевал сработать
+  // раньше тика, а на медленном раннере CI — нет, и проверка падала на
+  // здоровом поведении.
+  let recovered = chapter;
+  try {
+    await waitFor(
+      async () => {
+        recovered = await probe(page);
+        return recovered.sliderW > chapter.sliderW;
+      },
+      { timeout: 6000, what: 'восстановления шкалы после снятия главы' }
+    );
+  } catch {}
   check(
     'после снятия главы шкала восстановилась',
     recovered.sliderW > chapter.sliderW,
