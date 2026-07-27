@@ -1853,10 +1853,29 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     let el = back ? ui.box.previousElementSibling : ui.box.nextElementSibling;
     while (el) {
       const rect = el.getBoundingClientRect();
-      if (rect.width > 0.5) return rect;
+      if (rect.width > 0.5) return paintedEdge(el, rect, back);
       el = back ? el.previousElementSibling : el.nextElementSibling;
     }
     return null;
+  }
+
+  // Видимый край соседа. Коробка контрола бывает шире того, что нарисовано:
+  // у `.ytp-time-display` таймкод лежит во вложенной плашке с собственным
+  // отступом, и зазор до неё складывался из нашего поля и этого отступа —
+  // до таймкода выходило заметно больше, чем у самого YouTube. Поэтому
+  // ищем крайнюю обращённую к нам грань среди потомков.
+  function paintedEdge(el, rect, back) {
+    // Если сосед рисует фон сам, его коробка и есть видимая грань.
+    if (!isTransparentBg(getComputedStyle(el).backgroundColor)) return rect;
+    for (const child of el.children) {
+      const cr = child.getBoundingClientRect();
+      if (cr.width <= 0.5) continue;
+      // Обращённую к нам грань берём у вложенной плашки, остальное неважно.
+      return back
+        ? { left: rect.left, right: Math.max(cr.right, rect.left) }
+        : { left: Math.min(cr.left, rect.right), right: rect.right };
+    }
+    return rect;
   }
 
   /**

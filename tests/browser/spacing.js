@@ -78,6 +78,36 @@ run('spacing: зазор до соседней кнопки', async ({ browser, 
     );
   }
 
+  // --- таймкод справа -----------------------------------------------------
+  // В живой строке `.ytp-time-display` фона не рисует: таймкод лежит во
+  // вложенной плашке с собственным отступом. Зазор до неё складывался из
+  // нашего поля и этого отступа — до таймкода выходило заметно больше, чем
+  // у самого YouTube.
+  {
+    const page = await openPage(browser, { withMain: { autoCollapse: true }, errors });
+    const gap = await page.evaluate(async () => {
+      const display = document.querySelector('.ytp-time-display');
+      const pill = display.querySelector('.tpill');
+      // Как в бою: у обёртки фона нет, отступ до плашки задаёт она сама.
+      display.style.background = 'transparent';
+      display.style.paddingLeft = '12px';
+      window.dispatchEvent(new Event('resize'));
+      await new Promise((done) => setTimeout(done, 250));
+      const box = document.querySelector('.ytev-box').getBoundingClientRect();
+      return {
+        toPill: +(pill.getBoundingClientRect().left - box.right).toFixed(1),
+        toBox: +(display.getBoundingClientRect().left - box.right).toFixed(1),
+        ours: getComputedStyle(document.querySelector('.ytev-box')).marginRight,
+      };
+    });
+    await page.close();
+    check(
+      'до видимого таймкода — ритм YouTube, а не поле плюс его отступ',
+      Math.abs(gap.toPill - EXPECTED) <= 1,
+      `до плашки ${gap.toPill}px, до коробки ${gap.toBox}px, мы ${gap.ours}`
+    );
+  }
+
   // --- Shorts ------------------------------------------------------------
   // Штатный блок громкости, на место которого мы встаём, обязан уйти из
   // потока целиком. Нулевой по размеру, но видимый элемент остаётся
