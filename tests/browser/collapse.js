@@ -50,11 +50,12 @@ run('collapse: форма и длительность сворачивания',
 
   // --- сворачивание -----------------------------------------------------
   await leave();
-  // курсор ушёл — сворачивание начинается через 500мс; ловим середину.
-  await page.waitForTimeout(620);
+  // Задержки перед сворачиванием больше нет: через 120мс переход в 250мс
+  // обязан уже идти. Раньше здесь были лишние полсекунды ожидания.
+  await page.waitForTimeout(120);
   const mid = await boxState();
   check(
-    'в середине сворачивания идёт анимация',
+    'сворачивание начинается сразу, без задержки',
     mid.animating && mid.collapsed,
     JSON.stringify(mid)
   );
@@ -116,5 +117,88 @@ run('collapse: форма и длительность сворачивания',
     JSON.stringify(reopened)
   );
 
+  // --- разворот прерывают на полпути ------------------------------------
+  // Штатная шкала YouTube начинает уезжать в тот же момент, когда ушёл
+  // указатель, — даже если ещё не выдвинулась целиком. Значит после ухода
+  // ширина обязана только уменьшаться: ни доводки до конца, ни скачка.
+  const reversal = await page.evaluate(async () => {
+    const box = document.querySelector('.ytev-box');
+    const slider = document.querySelector('.ytev-slider');
+    const width = () => slider.getBoundingClientRect().width;
+    const frame = () => new Promise((done) => requestAnimationFrame(done));
+
+    box.dispatchEvent(new MouseEvent('mouseleave'));
+    while (box.classList.contains('ytev-animating')) await frame();
+
+    const opening = [];
+    box.dispatchEvent(new MouseEvent('mouseenter'));
+    for (let i = 0; i < 6; i += 1) {
+      await frame();
+      opening.push(width());
+    }
+    const atLeave = width();
+    box.dispatchEvent(new MouseEvent('mouseleave'));
+    const closing = [];
+    for (let i = 0; i < 30; i += 1) {
+      await frame();
+      closing.push(width());
+    }
+    return { opening, atLeave, closing, full: opening[opening.length - 1] };
+  });
+  check(
+    'разворот прерван на полпути, а не доведён до конца',
+    reversal.atLeave > 1 && Math.max(...reversal.closing) <= reversal.atLeave + 1,
+    `на момент ухода ${Math.round(reversal.atLeave)}px, максимум после — ` +
+      `${Math.round(Math.max(...reversal.closing))}px`
+  );
+  check(
+    'после ухода указателя шкала едет только в одну сторону',
+    reversal.closing.every((w, i) => i === 0 || w <= reversal.closing[i - 1] + 1),
+    reversal.closing.map((w) => Math.round(w)).join(' ')
+  );
+  check(
+    'прерванный разворот доезжает до нуля',
+    reversal.closing[reversal.closing.length - 1] < 1,
+    `итог ${reversal.closing[reversal.closing.length - 1]}px`
+  );
+
   await page.close();
+
+  // --- воздух за концом шкалы, когда процентов нет ----------------------
+  const withLabel = await padding(browser, errors, true);
+  const noLabel = await padding(browser, errors, false);
+  check(
+    'без процентов за концом шкалы больше воздуха',
+    noLabel.right > withLabel.right + 2,
+    `${noLabel.right}px против ${withLabel.right}px с подписью`
+  );
+  check(
+    'хвост — 1.75 обычного поля',
+    Math.abs(noLabel.right - noLabel.pad * 1.75) <= 1,
+    `${noLabel.right}px при поле ${noLabel.pad}px`
+  );
+  check(
+    'подпись на месте — поле обычное',
+    Math.abs(withLabel.right - withLabel.pad) <= 1,
+    `${withLabel.right}px при поле ${withLabel.pad}px`
+  );
 });
+
+// Поля рамки в развёрнутом состоянии при включённых и выключенных процентах.
+async function padding(browser, errors, showPercent) {
+  const page = await openPage(browser, {
+    withMain: { autoCollapse: false, showPercent },
+    errors,
+  });
+  const result = await page.evaluate(() => {
+    const box = document.querySelector('.ytev-box');
+    const style = getComputedStyle(box);
+    return {
+      right: Math.round(parseFloat(style.paddingRight)),
+      pad: Math.round(parseFloat(style.getPropertyValue('--ytev-pad'))),
+      nolabel: box.classList.contains('ytev-nolabel'),
+    };
+  });
+  await page.close();
+  return result;
+}

@@ -1258,6 +1258,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     .ytev-box.ytev-framed {
       padding: 0 var(--ytev-pad, 10px) 0 calc(var(--ytev-pad, 10px) * .25);
       gap: calc(var(--ytev-pad, 10px) * .5);
+      /* «Хвост» за концом шкалы, когда подписи с процентами нет. С обычным
+         полем дорожка упиралась в рамку почти вплотную, а у штатной кнопки
+         YouTube за её концом заметно больше воздуха. Когда подпись есть,
+         этот воздух дают промежуток и сама подпись. */
+      --ytev-tail: calc(var(--ytev-pad, 10px) * 1.75);
     }
     .ytev-box:not(.ytev-framed) { gap: 6px; }
     /* Если штатная кнопка звука была у правого края (обычное место в
@@ -1266,6 +1271,15 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     .ytev-box.ytev-mirrored { flex-direction: row-reverse; }
     .ytev-box.ytev-framed.ytev-mirrored:not(.ytev-collapsed) {
       padding: 0 calc(var(--ytev-pad, 10px) * .25) 0 var(--ytev-pad, 10px);
+    }
+    /* :not(.ytev-collapsed) обязателен: без него эти правила перебили бы
+       поля свёрнутого круга — у них выше специфичность. */
+    .ytev-box.ytev-framed.ytev-nolabel:not(.ytev-collapsed) {
+      padding-right: var(--ytev-tail);
+    }
+    .ytev-box.ytev-framed.ytev-mirrored.ytev-nolabel:not(.ytev-collapsed) {
+      padding-right: calc(var(--ytev-pad, 10px) * .25);
+      padding-left: var(--ytev-tail);
     }
     /* Shorts: своего места в интерфейсе нет — кладём блок в собственный
        слой поверх плеера. Слой не перехватывает клики, блок — перехватывает */
@@ -1833,6 +1847,16 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     return free - SAFETY_GAP;
   }
 
+  // Видимость подписи с процентами. Класс на блоке нужен рамке: без
+  // подписи за концом шкалы остаётся собственный «хвост», иначе дорожка
+  // упирается в край. Подпись прячет и настройка, и нехватка места, поэтому
+  // решение живёт в одном месте.
+  function showLabel(visible) {
+    if (!ui) return;
+    ui.label.style.display = visible ? '' : 'none';
+    ui.box.classList.toggle('ytev-nolabel', !visible);
+  }
+
   // Длина ползунка = настраиваемая доля ширины плеера, ограниченная
   // свободным местом; по краям рамки — постоянный зазор edgeGap. Если
   // места мало, сначала убираем подпись с процентами, а если и это не
@@ -1852,7 +1876,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       const wasFolded = ui.box.classList.contains('ytev-collapsed');
       ui.box.classList.remove('ytev-collapsed');
       enterNormal(player);
-      ui.label.style.display = SETTINGS.showPercent ? '' : 'none';
+      showLabel(SETTINGS.showPercent);
       // кнопка у правого края — раскрываемся влево
       ui.box.classList.toggle('ytev-mirrored', !!shortsAnchor && shortsAnchor.fx > 0.5);
       syncFrameStyle();
@@ -1890,7 +1914,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const wasCollapsed = ui.box.classList.contains('ytev-collapsed');
     ui.box.classList.remove('ytev-collapsed');
     enterNormal(player);
-    ui.label.style.display = SETTINGS.showPercent ? '' : 'none';
+    showLabel(SETTINGS.showPercent);
     syncFrameStyle(); // поля рамки влияют на замер — обновляем до него
     if (innerWidth(row) <= 0) {
       if (wasCollapsed) updateCollapsed(false);
@@ -1905,7 +1929,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
     let free = freeSpace(row);
     if (free < MIN_SLIDER && SETTINGS.showPercent) {
-      ui.label.style.display = 'none';
+      showLabel(false);
       free = freeSpace(row);
     }
 
@@ -1934,7 +1958,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // Автосворачивание: класс ytev-collapsed ставится, когда включена
   // настройка и на блоке нет ни курсора, ни фокуса. Переходы включаются
   // только на время переключения, чтобы не мешать замерам layout().
-  let collapseTimer = 0;
   let animTimer = 0;
   let animCleanup = null;
   function updateCollapsed(animate = true) {
@@ -2587,14 +2610,16 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     box.addEventListener('mouseenter', () => {
       if (!ui) return;
       ui.hover = true;
-      clearTimeout(collapseTimer);
       updateCollapsed();
     });
     box.addEventListener('mouseleave', () => {
       if (!ui) return;
       ui.hover = false;
-      clearTimeout(collapseTimer);
-      collapseTimer = setTimeout(updateCollapsed, 500);
+      // Сразу, без задержки: штатная шкала YouTube тоже начинает уезжать в
+      // тот же момент, когда указатель ушёл. Полсекунды ожидания читались
+      // как залипание, а незавершённое разворачивание всё это время
+      // оставалось на экране.
+      updateCollapsed();
     });
     box.addEventListener('focusin', () => updateCollapsed());
     box.addEventListener('focusout', () => setTimeout(updateCollapsed, 0));
@@ -2784,7 +2809,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   function disposeInstance() {
     if (domObserver) domObserver.disconnect();
     clearTimeout(sweepTimer);
-    clearTimeout(collapseTimer);
     if (animCleanup) animCleanup();
     clearTimeout(saveVolumeTimer);
     clearTimeout(saveMutedTimer);
