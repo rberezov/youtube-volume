@@ -15,6 +15,7 @@ const HARNESSES = [
   'dom-churn.js',
   'collapse.js',
   'spacing.js',
+  'preview.js',
   'popup-fit.js',
   'carryover.js',
   'mute-persist.js',

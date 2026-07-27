@@ -588,6 +588,37 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     true
   );
 
+  /* ------------------------------------------------------------------ *
+   * Предпросмотр ролика в ленте
+   *
+   * Наведение на карточку поднимает отдельный плеер (`ytd-video-preview` со
+   * своим `#inline-player` и своим `<video>`), и ведёт он себя сам по себе:
+   * стартует немым, а по кнопке снимает немоту на том уровне, который помнит
+   * YouTube. Своей шкалы мы туда не встраиваем и штатную кнопку не трогаем —
+   * менять громкость в предпросмотре незачем. Но раз звук пошёл, идти он
+   * должен на сохранённом уровне, а не на чужом.
+   *
+   * Только применяем. Обратно в хранилище с предпросмотра не пишем ничего:
+   * это не осознанный выбор уровня, а побочный эффект наведения.
+   * ------------------------------------------------------------------ */
+  function applyPreviewVolume(el) {
+    if (!volumeStateLoaded || !validVolume(preferredVolume)) return;
+    if (!(el instanceof HTMLMediaElement)) return;
+    // Главный плеер ведёт bindVideo() со всей своей логикой намерений.
+    if (el === boundVideo || el === getVideo()) return;
+    if (el.muted) return; // немой предпросмотр не трогаем
+    const current = Number(logicalOf(el));
+    if (validVolume(current) && Math.abs(current - preferredVolume) <= VOLUME_EPSILON) {
+      return; // уже наш уровень — молчим, иначе была бы перепалка записей
+    }
+    el.volume = preferredVolume;
+  }
+  for (const type of ['playing', 'volumechange', 'loadeddata']) {
+    // Медиа-события не всплывают, но фазу перехвата проходят — поэтому один
+    // слушатель на документе видит и те плееры, которых ещё нет в DOM.
+    on(document, type, (e) => applyPreviewVolume(e.target), true);
+  }
+
   function restorePreferredVolume(video) {
     if (!video || !validVolume(preferredVolume)) return false;
     const current = Number(logicalOf(video));
