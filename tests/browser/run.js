@@ -29,6 +29,11 @@ if (!list.length) {
   process.exit(1);
 }
 
+// Предохранитель: харнесс поднимает браузер, и если тот не запустится или
+// повиснет на ожидании, прогон без ограничения ждал бы вечно и не показал
+// бы даже, на чём именно застрял. Самый долгий харнесс идёт около 20с.
+const HARNESS_TIMEOUT_MS = 180000;
+
 const failed = [];
 const started = Date.now();
 
@@ -36,7 +41,14 @@ for (const name of list) {
   const result = spawnSync(process.execPath, [path.join(__dirname, name)], {
     stdio: 'inherit',
     env: process.env,
+    timeout: HARNESS_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   });
+  if (result.error && result.error.code === 'ETIMEDOUT') {
+    console.log(`\n СБОЙ  ${name}: не уложился в ${HARNESS_TIMEOUT_MS / 1000}с и был снят`);
+    failed.push(name);
+    continue;
+  }
   if (result.status !== 0) failed.push(name);
 }
 
