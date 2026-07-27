@@ -41,6 +41,7 @@ assert.deepEqual(
   keys,
   [
     'autoCollapse',
+    'collapseDelay',
     'enabled',
     'gamma',
     'normalizeLoudness',

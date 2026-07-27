@@ -50,7 +50,6 @@
       <div class="section-heading section-heading--compact">
         <div>
           <h2 id="sizeTitle" data-i18n="sizeTitle">Размер ползунка</h2>
-          <p data-i18n="sizeDescription">Отдельно для обычных видео и Shorts.</p>
         </div>
       </div>
 
@@ -94,6 +93,17 @@
         </span>
         <span class="switch">
           <input type="checkbox" id="autoCollapse">
+          <span class="switch-track" aria-hidden="true"></span>
+        </span>
+      </label>
+
+      <label class="switch-row switch-row--sub own-only" id="collapseDelayRow" for="collapseDelay">
+        <span class="switch-copy">
+          <span class="switch-title" data-i18n="collapseDelayTitle">Задержка перед сворачиванием</span>
+          <span class="switch-description" data-i18n="collapseDelayDescription">Удобно с длинной шкалой</span>
+        </span>
+        <span class="switch">
+          <input type="checkbox" id="collapseDelay">
           <span class="switch-track" aria-hidden="true"></span>
         </span>
       </label>

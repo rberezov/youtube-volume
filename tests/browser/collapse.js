@@ -164,6 +164,60 @@ run('collapse: форма и длительность сворачивания',
 
   await page.close();
 
+  // --- старый режим: задержка перед сворачиванием ------------------------
+  // С длинной шкалой мелкое движение мышью легко выводит курсор за рамку, и
+  // мгновенное сворачивание мешает. Настройка возвращает прежнее поведение:
+  // полсекунды на возврат, за которые разворот успевает дойти до конца.
+  {
+    const delayed = await openPage(browser, {
+      withMain: { autoCollapse: true, collapseDelay: true },
+      errors,
+    });
+    const state = () =>
+      delayed.evaluate(() => {
+        const box = document.querySelector('.ytev-box');
+        return {
+          collapsed: box.classList.contains('ytev-collapsed'),
+          width: Math.round(box.getBoundingClientRect().width),
+        };
+      });
+
+    await delayed.hover('.ytev-box');
+    await waitFor(async () => !(await state()).collapsed, { what: 'разворачивания' });
+    await delayed.mouse.move(10, 10);
+
+    await delayed.waitForTimeout(200); // раньше здесь уже было бы свёрнуто
+    const during = await state();
+    check(
+      'с задержкой шкала ещё открыта через 200мс после ухода',
+      !during.collapsed,
+      JSON.stringify(during)
+    );
+
+    await waitFor(async () => (await state()).collapsed, {
+      timeout: 2000,
+      what: 'сворачивания по истечении задержки',
+    });
+    check('по истечении задержки блок всё же сворачивается', true);
+
+    // Вернулся до истечения — сворачивания не происходит вовсе.
+    await delayed.hover('.ytev-box');
+    await waitFor(async () => !(await state()).collapsed, { what: 'повторного разворота' });
+    await delayed.evaluate(() => {
+      const box = document.querySelector('.ytev-box');
+      box.dispatchEvent(new MouseEvent('mouseleave'));
+      box.dispatchEvent(new MouseEvent('mouseenter'));
+    });
+    await delayed.waitForTimeout(700);
+    const returned = await state();
+    check(
+      'возврат курсора до истечения задержки отменяет сворачивание',
+      !returned.collapsed,
+      JSON.stringify(returned)
+    );
+    await delayed.close();
+  }
+
   // --- воздух за концом шкалы, когда процентов нет ----------------------
   const withLabel = await padding(browser, errors, true);
   const noLabel = await padding(browser, errors, false);

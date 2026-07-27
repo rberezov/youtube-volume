@@ -7,6 +7,7 @@ const DEFAULTS = {
   shortsScale: 11,
   showPercent: true,
   autoCollapse: true,
+  collapseDelay: false,
   useNativeSlider: false,
   normalizeLoudness: false,
 };
@@ -54,6 +55,7 @@ const $shortsValue = document.getElementById('shortsValue');
 const $useNative = document.getElementById('useNativeSlider');
 const $showPercent = document.getElementById('showPercent');
 const $autoCollapse = document.getElementById('autoCollapse');
+const $collapseDelay = document.getElementById('collapseDelay');
 const $normalize = document.getElementById('normalizeLoudness');
 const $saveStatus = document.getElementById('saveStatus');
 const $saveStatusText = document.getElementById('saveStatusText');
@@ -67,6 +69,7 @@ const controls = [
   $useNative,
   $showPercent,
   $autoCollapse,
+  $collapseDelay,
   $normalize,
 ];
 
@@ -93,6 +96,10 @@ function render() {
   for (const row of document.querySelectorAll('.own-only')) {
     row.hidden = $useNative.checked;
   }
+  // Задержка имеет смысл только при включённом автосворачивании: без него
+  // сворачивать нечего, и строка только занимала бы место.
+  document.getElementById('collapseDelayRow').hidden =
+    $useNative.checked || !$autoCollapse.checked;
 }
 
 function setControls(settings) {
@@ -103,6 +110,7 @@ function setControls(settings) {
   $useNative.checked = settings.useNativeSlider;
   $showPercent.checked = settings.showPercent;
   $autoCollapse.checked = settings.autoCollapse;
+  $collapseDelay.checked = settings.collapseDelay;
   $normalize.checked = settings.normalizeLoudness;
 }
 
@@ -115,6 +123,7 @@ function values() {
     useNativeSlider: $useNative.checked,
     showPercent: $showPercent.checked,
     autoCollapse: $autoCollapse.checked,
+    collapseDelay: $collapseDelay.checked,
     normalizeLoudness: $normalize.checked,
   };
 }

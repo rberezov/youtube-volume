@@ -45,9 +45,6 @@
   "sizeTitle": {
     "message": "Slider size"
   },
-  "sizeDescription": {
-    "message": "Set separately for regular videos and Shorts."
-  },
   "sizeVideo": {
     "message": "Regular video"
   },
@@ -68,6 +65,12 @@
   },
   "autoCollapseDescription": {
     "message": "Compact view when the pointer is away"
+  },
+  "collapseDelayTitle": {
+    "message": "Delay before collapsing"
+  },
+  "collapseDelayDescription": {
+    "message": "Handy with a long slider"
   },
   "useNativeTitle": {
     "message": "Use the YouTube slider"

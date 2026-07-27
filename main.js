@@ -84,6 +84,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     shortsScale: 11,        // то же для Shorts — плеер узкий, размер свой
     showPercent: true,      // подпись с процентами рядом с ползунком
     autoCollapse: true,     // сворачивать шкалу, когда курсор не на ней
+    collapseDelay: false,   // сворачивать не сразу, дав шкале открыться
     useNativeSlider: false, // не строить свою шкалу — оставить штатную
     normalizeLoudness: false, // подтягивать тихие ролики к общему уровню
   };
@@ -130,6 +131,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       'enabled',
       'showPercent',
       'autoCollapse',
+      'collapseDelay',
       'useNativeSlider',
       'normalizeLoudness',
     ]) {
@@ -1960,6 +1962,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // только на время переключения, чтобы не мешать замерам layout().
   let animTimer = 0;
   let animCleanup = null;
+  // Пауза «старого режима»: столько ждём после ухода указателя, если
+  // включена настройка «Задержка перед сворачиванием».
+  const COLLAPSE_DELAY_MS = 500;
+  let collapseTimer = 0;
   function updateCollapsed(animate = true) {
     if (!ui) return;
     // разворот держит только клавиатурный фокус (:focus-visible) — обычный
@@ -2610,16 +2616,23 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     box.addEventListener('mouseenter', () => {
       if (!ui) return;
       ui.hover = true;
+      clearTimeout(collapseTimer);
       updateCollapsed();
     });
     box.addEventListener('mouseleave', () => {
       if (!ui) return;
       ui.hover = false;
-      // Сразу, без задержки: штатная шкала YouTube тоже начинает уезжать в
-      // тот же момент, когда указатель ушёл. Полсекунды ожидания читались
-      // как залипание, а незавершённое разворачивание всё это время
-      // оставалось на экране.
-      updateCollapsed();
+      // По умолчанию сразу: штатная шкала YouTube тоже начинает уезжать в
+      // тот же момент, когда указатель ушёл. Но с длинной шкалой мелкое
+      // движение мышью легко выводит курсор за рамку, и тогда удобнее
+      // прежнее поведение — полсекунды на возврат, за которые разворот
+      // успевает дойти до конца. Это и включает настройка.
+      clearTimeout(collapseTimer);
+      if (SETTINGS.collapseDelay) {
+        collapseTimer = setTimeout(updateCollapsed, COLLAPSE_DELAY_MS);
+      } else {
+        updateCollapsed();
+      }
     });
     box.addEventListener('focusin', () => updateCollapsed());
     box.addEventListener('focusout', () => setTimeout(updateCollapsed, 0));
@@ -2809,6 +2822,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   function disposeInstance() {
     if (domObserver) domObserver.disconnect();
     clearTimeout(sweepTimer);
+    clearTimeout(collapseTimer);
     if (animCleanup) animCleanup();
     clearTimeout(saveVolumeTimer);
     clearTimeout(saveMutedTimer);

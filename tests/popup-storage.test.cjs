@@ -41,6 +41,8 @@ const ids = [
   'useNativeSlider',
   'showPercent',
   'autoCollapse',
+  'collapseDelay',
+  'collapseDelayRow',
   'normalizeLoudness',
   'saveStatus',
   'saveStatusText',

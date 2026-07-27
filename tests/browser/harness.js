@@ -30,6 +30,7 @@ const DEFAULT_SETTINGS = {
   shortsScale: 11,
   showPercent: true,
   autoCollapse: true,
+  collapseDelay: false,
   useNativeSlider: false,
   normalizeLoudness: false,
 };

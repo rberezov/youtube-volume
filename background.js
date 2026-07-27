@@ -11,6 +11,7 @@ const DEFAULTS = {
   shortsScale: 11,
   showPercent: true,
   autoCollapse: true,
+  collapseDelay: false,
   useNativeSlider: false,
   normalizeLoudness: false,
 };

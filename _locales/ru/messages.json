@@ -45,9 +45,6 @@
   "sizeTitle": {
     "message": "Размер ползунка"
   },
-  "sizeDescription": {
-    "message": "Отдельно для обычных видео и Shorts."
-  },
   "sizeVideo": {
     "message": "Обычное видео"
   },
@@ -68,6 +65,12 @@
   },
   "autoCollapseDescription": {
     "message": "Компактный вид без курсора"
+  },
+  "collapseDelayTitle": {
+    "message": "Задержка перед сворачиванием"
+  },
+  "collapseDelayDescription": {
+    "message": "Удобно с длинной шкалой"
   },
   "useNativeTitle": {
     "message": "Использовать шкалу YouTube"
