@@ -987,6 +987,19 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // нужно; не совпал — расширение перезагрузили, и мы уступаем место.
     channel: CHANNEL_ID,
     dispose: disposeInstance,
+    // Что расширение решило про громкость текущего ролика. Нужно, чтобы
+    // сверить наш вывод с числом, которое YouTube показывает в «Статистике
+    // для сисадминов»: там то же значение подписано как content loudness.
+    // Ничего закрытого не отдаёт — уровень ролика странице и так известен.
+    loudness() {
+      return {
+        enabled: SETTINGS.normalizeLoudness,
+        db: readLoudnessDb(getPlayer()),
+        boost: loudnessBoost,
+        boostDb: Number((20 * Math.log10(loudnessBoost)).toFixed(2)),
+        maxBoostDb: MAX_BOOST_DB,
+      };
+    },
     update(candidateSecret, payload) {
       if (candidateSecret !== updateSecret) return false;
       return applyTrustedPayload(payload, false);

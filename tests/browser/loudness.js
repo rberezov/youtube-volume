@@ -45,7 +45,7 @@ run('loudness: компенсация тихих роликов', async ({ brows
   const { check } = reporter;
 
   // Возвращает последнее усиление, доехавшее до GainNode.
-  async function measure({ loudnessDb, normalize }) {
+  async function measure({ loudnessDb, normalize, withReport = false }) {
     const page = await openPage(browser, {
       withMain: { normalizeLoudness: normalize },
       errors,
@@ -103,8 +103,13 @@ run('loudness: компенсация тихих роликов', async ({ brows
       // при работающем графе элемент держится на максимуме
       return descriptor.get.call(document.querySelector('video')) !== null;
     });
+    const report = withReport
+      ? await page.evaluate(() =>
+          window[Symbol.for('ytev.main.instance.v2')].loudness()
+        )
+      : null;
     await page.close();
-    return { last: gains.length ? gains[gains.length - 1] : null, gains, built };
+    return { last: gains.length ? gains[gains.length - 1] : null, gains, built, report };
   }
 
   const quiet = await measure({ loudnessDb: -6, normalize: true });
@@ -138,6 +143,20 @@ run('loudness: компенсация тихих роликов', async ({ brows
     'усиление ограничено 6дБ даже для очень тихого',
     veryQuiet.last !== null && Math.abs(veryQuiet.last - BASE_GAIN * boostOf(6)) < 1e-6,
     `${veryQuiet.last} против потолка ${BASE_GAIN * boostOf(6)}`
+  );
+
+  // Диагностика должна показывать то же, что реально ушло в усилитель:
+  // ею пользователь сверяет наш вывод со «Статистикой для сисадминов».
+  const reported = await measure({ loudnessDb: -6, normalize: true, withReport: true });
+  check(
+    'диагностика показывает прочитанный уровень',
+    reported.report && reported.report.db === -6,
+    JSON.stringify(reported.report)
+  );
+  check(
+    'диагностика показывает применённое усиление',
+    reported.report && Math.abs(reported.report.boostDb - 6) < 0.01,
+    JSON.stringify(reported.report)
   );
 
   const missing = await measure({ loudnessDb: null, normalize: true });
