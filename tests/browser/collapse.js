@@ -22,7 +22,7 @@ run('collapse: форма и длительность сворачивания',
       const box = document.querySelector('.ytev-box');
       if (!box) return null;
       const style = getComputedStyle(box);
-      const label = document.querySelector('.ytev-label');
+      const label = document.querySelector('.ytev-label-slot');
       const rect = box.getBoundingClientRect();
       return {
         radius: style.borderTopLeftRadius,
@@ -91,9 +91,9 @@ run('collapse: форма и длительность сворачивания',
   // ширину в первом же кадре — раньше, чем успевала вырасти шкала.
   const early = await page.evaluate(async () => {
     const box = document.querySelector('.ytev-box');
-    const label = document.querySelector('.ytev-label');
+    const label = document.querySelector('.ytev-label-slot');
     const scope = () => document.querySelector('.ytp-left-controls');
-    scope().dispatchEvent(new MouseEvent('mouseenter'));
+    document.querySelector('.ytev-box').dispatchEvent(new MouseEvent('mouseenter'));
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     return {
       labelWidth: Math.round(label.getBoundingClientRect().width),
@@ -133,7 +133,7 @@ run('collapse: форма и длительность сворачивания',
     while (box.classList.contains('ytev-animating')) await frame();
 
     const opening = [];
-    scope().dispatchEvent(new MouseEvent('mouseenter'));
+    document.querySelector('.ytev-box').dispatchEvent(new MouseEvent('mouseenter'));
     for (let i = 0; i < 6; i += 1) {
       await frame();
       opening.push(width());
@@ -184,7 +184,7 @@ run('collapse: форма и длительность сворачивания',
       while (box.classList.contains('ytev-animating')) await frame();
       const full = input.getBoundingClientRect().width;
 
-      scope.dispatchEvent(new MouseEvent('mouseenter'));
+      document.querySelector('.ytev-box').dispatchEvent(new MouseEvent('mouseenter'));
       const samples = [];
       for (let i = 0; i < 8; i += 1) {
         await frame();
@@ -207,6 +207,96 @@ run('collapse: форма и длительность сворачивания',
       'сама шкала при этом своего размера не меняет',
       mid.every((s) => Math.abs(s.input - widths.full) < 1),
       mid.map((s) => `${Math.round(s.slot)}/${Math.round(s.input)}`).join(' ')
+    );
+  }
+
+  // --- бегунок не должен обрезаться обёрткой -----------------------------
+  // Дорожка 4px, а бегунок 13px и торчит за её пределы. Пока обёртка была
+  // высотой по содержимому, overflow: hidden срезал его сверху и снизу —
+  // «пимпочка» пропадала совсем.
+  {
+    const thumb = await openPage(browser, { withMain: { autoCollapse: false }, errors });
+    const room = await thumb.evaluate(() => {
+      const slot = document.querySelector('.ytev-slot');
+      const box = document.querySelector('.ytev-box');
+      return {
+        slotH: Math.round(slot.getBoundingClientRect().height),
+        boxH: Math.round(box.getBoundingClientRect().height),
+        thumb: parseFloat(getComputedStyle(box).getPropertyValue('--ytev-thumb')),
+      };
+    });
+    await thumb.close();
+    check(
+      'обёртка выше бегунка — он не обрезается',
+      room.slotH >= room.thumb,
+      `обёртка ${room.slotH}px при бегунке ${room.thumb}px и рамке ${room.boxH}px`
+    );
+  }
+
+  // --- кнопка не должна дёргаться при наведении --------------------------
+  // Поле со стороны значка обязано совпадать в обоих состояниях, иначе
+  // кнопка съезжает на доли пикселя туда-обратно при каждом наведении.
+  {
+    const still = await openPage(browser, { withMain: { autoCollapse: true }, errors });
+    const shift = await still.evaluate(async () => {
+      const box = document.querySelector('.ytev-box');
+      const btn = document.querySelector('.ytev-mute');
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      const left = () => btn.getBoundingClientRect().left - box.getBoundingClientRect().left;
+
+      document.querySelector('.ytp-left-controls').dispatchEvent(new MouseEvent('mouseleave'));
+      while (box.classList.contains('ytev-animating')) await frame();
+      const collapsed = left();
+
+      box.dispatchEvent(new MouseEvent('mouseenter'));
+      while (box.classList.contains('ytev-animating')) await frame();
+      return { collapsed, expanded: left() };
+    });
+    await still.close();
+    check(
+      'кнопка не смещается при раскрытии',
+      Math.abs(shift.collapsed - shift.expanded) < 0.01,
+      `свёрнуто ${shift.collapsed}px, раскрыто ${shift.expanded}px от края рамки`
+    );
+  }
+
+  // --- проценты появляются вслед за шкалой -------------------------------
+  {
+    const follow = await openPage(browser, { withMain: { autoCollapse: true }, errors });
+    const order = await follow.evaluate(async () => {
+      const box = document.querySelector('.ytev-box');
+      const slot = document.querySelector('.ytev-slot');
+      const labelSlot = document.querySelector('.ytev-label-slot');
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+
+      document.querySelector('.ytp-left-controls').dispatchEvent(new MouseEvent('mouseleave'));
+      while (box.classList.contains('ytev-animating')) await frame();
+
+      box.dispatchEvent(new MouseEvent('mouseenter'));
+      const samples = [];
+      for (let i = 0; i < 20; i += 1) {
+        await frame();
+        samples.push({
+          slider: slot.getBoundingClientRect().width,
+          label: labelSlot.getBoundingClientRect().width,
+        });
+      }
+      return samples;
+    });
+    await follow.close();
+
+    const sliderStart = order.findIndex((s) => s.slider > 0.5);
+    const labelStart = order.findIndex((s) => s.label > 0.5);
+    check(
+      'проценты трогаются позже шкалы',
+      sliderStart >= 0 && labelStart > sliderStart,
+      `шкала с кадра ${sliderStart}, проценты с кадра ${labelStart}`
+    );
+    const midLabel = order.filter((s) => s.label > 0.5 && s.label < order.at(-1).label - 0.5);
+    check(
+      'проценты открываются постепенно, а не разом',
+      midLabel.length > 0,
+      `промежуточных замеров подписи: ${midLabel.length}`
     );
   }
 
@@ -280,7 +370,7 @@ run('collapse: форма и длительность сворачивания',
     await delayed.evaluate(() => {
       const scope = document.querySelector('.ytp-left-controls');
       scope.dispatchEvent(new MouseEvent('mouseleave'));
-      scope.dispatchEvent(new MouseEvent('mouseenter'));
+      document.querySelector('.ytev-box').dispatchEvent(new MouseEvent('mouseenter'));
     });
     await delayed.waitForTimeout(700);
     const returned = await state();

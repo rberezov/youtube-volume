@@ -21,7 +21,7 @@ const probe = (page) =>
       overflowRight: rect && chromeRect ? Math.round(rect.right - chromeRect.right) : 0,
       overflowLeft: rect && chromeRect ? Math.round(chromeRect.left - rect.left) : 0,
       sliderW: slider ? Math.round(slider.getBoundingClientRect().width) : 0,
-      labelShown: visible(document.querySelector('.ytev-label')),
+      labelShown: visible(document.querySelector('.ytev-label-slot')),
       nativeBack: visible(nativePanel) || visible(document.querySelector('.ytp-mute-button')),
       controllable: !!slider || visible(nativePanel),
     };

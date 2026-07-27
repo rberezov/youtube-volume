@@ -1229,6 +1229,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       --ytev-track: 4px;
       --ytev-thumb: 13px;
       --ytev-font: 12px;
+      --ytev-pct: 2.5em; /* ровно под «100%» */
       display: flex;
       align-items: center;
       align-self: center;
@@ -1258,7 +1259,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     /* геометрия рамки: справа поле --ytev-pad, слева меньше — значок
        YouTube (viewBox 24×24) несёт собственные внутренние поля */
     .ytev-box.ytev-framed {
-      padding: 0 var(--ytev-pad, 10px) 0 calc(var(--ytev-pad, 10px) * .25);
+      /* Поле со стороны значка. Одно и то же в обоих состояниях: пока
+         свёрнутый круг имел свои 2px, кнопка при наведении заметно
+         подпрыгивала на четверть пикселя туда-обратно. */
+      --ytev-lead: calc(var(--ytev-pad, 10px) * .25);
+      padding: 0 var(--ytev-pad, 10px) 0 var(--ytev-lead);
       gap: calc(var(--ytev-pad, 10px) * .5);
       /* «Хвост» за концом шкалы, когда подписи с процентами нет. С обычным
          полем дорожка упиралась в рамку почти вплотную, а у штатной кнопки
@@ -1272,7 +1277,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
        месте, как у штатной выезжающей панели */
     .ytev-box.ytev-mirrored { flex-direction: row-reverse; }
     .ytev-box.ytev-framed.ytev-mirrored:not(.ytev-collapsed) {
-      padding: 0 calc(var(--ytev-pad, 10px) * .25) 0 var(--ytev-pad, 10px);
+      padding: 0 var(--ytev-lead) 0 var(--ytev-pad, 10px);
     }
     /* :not(.ytev-collapsed) обязателен: без него эти правила перебили бы
        поля свёрнутого круга — у них выше специфичность. */
@@ -1280,7 +1285,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       padding-right: var(--ytev-tail);
     }
     .ytev-box.ytev-framed.ytev-mirrored.ytev-nolabel:not(.ytev-collapsed) {
-      padding-right: calc(var(--ytev-pad, 10px) * .25);
+      padding-right: var(--ytev-lead);
       padding-left: var(--ytev-tail);
     }
     /* Shorts: своего места в интерфейсе нет — кладём блок в собственный
@@ -1392,6 +1397,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     .ytev-slot {
       display: flex;
       align-items: center;
+      /* На всю высоту рамки: сама дорожка 4px, а бегунок 13px и торчит за
+         её пределы. При высоте по содержимому overflow: hidden срезал его
+         сверху и снизу — бегунок пропадал совсем. */
+      align-self: stretch;
       /* Сжиматься обёртке можно: если замер свободного места ошибся, flex
          ужмёт её, и layout() увидит это и вернёт штатный ползунок. Сам
          <input> внутри при этом остаётся своего размера. */
@@ -1399,16 +1408,28 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       min-width: 0;
       overflow: hidden;
     }
+    /* С клавиатурным фокусом шкала и так раскрыта, обрезать нечего — зато
+       иначе обрезалась бы рамка фокуса по бокам. */
+    .ytev-box:focus-within .ytev-slot { overflow: visible; }
     /* Зеркальный режим: блок раскрывается влево, значит шкала должна
        выезжать из-под кнопки, оставаясь прижатой к ней правым краем. */
     .ytev-box.ytev-mirrored .ytev-slot { justify-content: flex-end; }
     .ytev-box.ytev-animating .ytev-slot { transition: width .25s ease; }
-    /* min-width подписи тоже в переходе: без него при разворачивании она
-       мгновенно занимала свои 2.5em (min-width перебивает max-width) и
-       выпрыгивала раньше, чем росла шкала. */
-    .ytev-box.ytev-animating .ytev-label {
-      transition: max-width .25s ease, min-width .25s ease, opacity .2s ease;
+    /* Проценты открываются вслед за шкалой: та же шторка, но со сдвигом на
+       0.1с. Общая длительность совпадает с длиной хода шкалы, поэтому конец
+       анимации по-прежнему ловится одним событием. Сворачивание идёт в
+       обратном порядке — подпись уходит первой, без сдвига. */
+    .ytev-box.ytev-animating .ytev-label-slot {
+      transition: max-width .15s ease .1s, opacity .15s ease .1s;
     }
+    .ytev-box.ytev-animating.ytev-collapsed .ytev-label-slot {
+      transition: max-width .15s ease, opacity .12s ease;
+    }
+    /* Ширина шторки процентов и минимальная ширина самой подписи — одна и
+       та же величина: тогда max-width шторки идёт от нуля ровно до
+       натуральной ширины подписи, и открытие размазано на всю анимацию, а
+       не заканчивается в первые кадры. */
+    .ytev-label-slot { max-width: var(--ytev-pct); }
     /* Свёрнутое состояние — ровный круг со значком по центру, как
        штатные круглые кнопки YouTube. Кнопка занимает «высота − 4px»,
        поэтому симметричные поля по 2px дают ширину, равную высоте.
@@ -1418,17 +1439,22 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
        же величина и анимируется, и на квадрате даёт ровный круг.
        !important перебивает инлайновое скругление, скопированное с плашки. */
     .ytev-box.ytev-collapsed { gap: 0; padding: 0; }
+    /* Свёрнутый круг: со стороны значка поле то же, что и в развёрнутом
+       виде, а противоположное добирает до квадрата — кнопка занимает
+       «высота − 4px», поэтому сумма полей равна 4px. */
     .ytev-box.ytev-framed.ytev-collapsed {
-      padding: 0 2px;
+      padding: 0 max(0px, calc(4px - var(--ytev-lead))) 0 var(--ytev-lead);
       border-radius: var(--ytev-round, 50%) !important;
+    }
+    .ytev-box.ytev-framed.ytev-mirrored.ytev-collapsed {
+      padding: 0 var(--ytev-lead) 0 max(0px, calc(4px - var(--ytev-lead)));
     }
     .ytev-box.ytev-collapsed .ytev-slot {
       width: 0 !important;
       min-width: 0 !important;
     }
-    .ytev-box.ytev-collapsed .ytev-label {
+    .ytev-box.ytev-collapsed .ytev-label-slot {
       max-width: 0;
-      min-width: 0;
       opacity: 0;
     }
     /* Уважаем системную настройку: там, где движение просят убрать,
@@ -1487,8 +1513,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       font-family: Roboto, Arial, sans-serif;
       font-size: var(--ytev-font);
       line-height: 1;
-      min-width: 2.5em; /* ровно под «100%», чтобы рамка не гуляла по ширине */
-      max-width: 5em;
+      min-width: var(--ytev-pct); /* под «100%», чтобы рамка не гуляла */
+      max-width: var(--ytev-pct);
       overflow: hidden;
       text-align: center; /* запас ширины делится поровну на обе стороны */
       white-space: nowrap;
@@ -1878,7 +1904,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // решение живёт в одном месте.
   function showLabel(visible) {
     if (!ui) return;
-    ui.label.style.display = visible ? '' : 'none';
+    // Прячем обёртку, а не саму подпись: скрытая подпись внутри видимой
+    // обёртки оставила бы после шкалы лишний промежуток.
+    ui.labelSlot.style.display = visible ? '' : 'none';
     ui.box.classList.toggle('ytev-nolabel', !visible);
   }
 
@@ -2523,7 +2551,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // наш блок: снимаем при любой его замене, не только при полном демонтаже.
   function detachHoverScope() {
     if (!ui || !ui.hoverScope) return;
-    ui.hoverScope.removeEventListener('mouseenter', ui.onScopeEnter);
     ui.hoverScope.removeEventListener('mouseleave', ui.onScopeLeave);
   }
 
@@ -2636,6 +2663,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
     const label = document.createElement('span');
     label.className = 'ytev-label';
+    // Проценты открываются той же шторкой, что и шкала, только чуть позже:
+    // сама подпись размера не меняет, её обрезает обёртка.
+    const labelSlot = document.createElement('div');
+    labelSlot.className = 'ytev-slot ytev-label-slot';
+    labelSlot.appendChild(label);
 
     // Шкала живёт в обрезающей обёртке, а не сворачивается сама. Раньше
     // анимировалась ширина самого <input>: он появлялся целиком, но сжатым,
@@ -2647,7 +2679,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     slot.className = 'ytev-slot';
     slot.appendChild(slider);
 
-    box.append(muteBtn, slot, label);
+    box.append(muteBtn, slot, labelSlot);
 
     if (mount.before && mount.before.isConnected) {
       mount.before.after(box); // ровно на место штатного блока громкости
@@ -2669,6 +2701,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // на блоке. Область — строка управления плеера, а в Shorts сам блок
     // (см. hoverScope ниже). Слушатели снимает teardownUI: строка живёт
     // дольше нашего блока, и оставленные на ней обработчики копились бы.
+    // Раскрывать начинаем только с самой кнопки — то есть со свёрнутого
+    // круга: наведение на соседнюю кнопку строки не должно выдвигать
+    // громкость, у штатного регулятора она тоже открывается от себя.
+    // А закрываем по уходу из всей строки: доведя мышь до шкалы, её обычно
+    // сразу тянут вбок, и схлопывание на полпути только мешает.
     const hoverScope = mount.overlay || mount.before ? box : controls;
     const onScopeEnter = () => {
       if (!ui) return;
@@ -2691,7 +2728,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         updateCollapsed();
       }
     };
-    hoverScope.addEventListener('mouseenter', onScopeEnter);
+    // Вход считаем по блоку (в свёрнутом виде это и есть кружок кнопки),
+    // выход — по всей области. В Shorts обе области совпадают.
+    box.addEventListener('mouseenter', onScopeEnter);
     hoverScope.addEventListener('mouseleave', onScopeLeave);
     box.addEventListener('focusin', () => updateCollapsed());
     box.addEventListener('focusout', () => setTimeout(updateCollapsed, 0));
@@ -2710,7 +2749,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     );
 
     ui = {
-      box, slider, slot, label, muteBtn,
+      box, slider, slot, label, labelSlot, muteBtn,
       hover: false,
       overlay: mount.overlay,
       shortsRow: !!mount.before,

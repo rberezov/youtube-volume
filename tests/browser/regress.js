@@ -93,7 +93,8 @@ run('regress: сборка, жесты, режимы, Shorts', async ({ browser,
   check(
     'без процентов: подписи нет',
     await page.evaluate(() => {
-      const label = document.querySelector('.ytev-label');
+      // Подпись прячется вместе со своей шторкой, поэтому смотрим на неё.
+      const label = document.querySelector('.ytev-label-slot');
       return !label || getComputedStyle(label).display === 'none';
     })
   );
