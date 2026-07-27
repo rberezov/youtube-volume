@@ -1244,7 +1244,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       --ytev-track: 4px;
       --ytev-thumb: 13px;
       --ytev-font: 12px;
-      --ytev-pct: 2.5em; /* ровно под «100%» */
+      /* Под «100%» с запасом: при 2.5em текст был на 0.7px шире коробки и
+         последний знак подрезался. */
+      --ytev-pct: 2.7em;
       --ytev-gap: 0px;
       display: flex;
       align-items: center;
@@ -1356,8 +1358,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       /* У штатной кнопки YouTube SVG 24×24 внутри зоны 36×36 — это 66.7%.
          Наша рамка ниже штатной пилюли, и в ней тот же значок смотрелся
          крупновато, поэтому доля чуть меньше. */
-      width: 60%;
-      height: 60%;
+      width: 47.4%;
+      height: 47.4%;
       display: block;
       overflow: visible;
     }
@@ -1482,7 +1484,16 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
        та же величина: тогда max-width шторки идёт от нуля ровно до
        натуральной ширины подписи, и открытие размазано на всю анимацию, а
        не заканчивается в первые кадры. */
-    .ytev-label-slot { max-width: calc(var(--ytev-pct) + var(--ytev-pct-side)); }
+    /* Свой размер шрифта здесь обязателен: --ytev-pct задан в em, а
+       считается он в том элементе, где используется. Без этой строки шторка
+       брала em от шрифта строки управления YouTube, а подпись — от своего.
+       На мелком шрифте строки шторка выходила уже содержимого и срезала
+       подпись справа: «%» съедался, а сама подпись прижималась к краю
+       рамки. Замер: при 9px в строке справа от текста оставалось −1.5px. */
+    .ytev-label-slot {
+      font-size: var(--ytev-font);
+      max-width: calc(var(--ytev-pct) + var(--ytev-pct-side));
+    }
     /* Свёрнутое состояние — ровный круг со значком по центру, как
        штатные круглые кнопки YouTube. Кнопка занимает «высота − 4px»,
        поэтому симметричные поля по 2px дают ширину, равную высоте.

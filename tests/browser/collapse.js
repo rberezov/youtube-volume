@@ -511,22 +511,40 @@ run('collapse: форма и длительность сворачивания',
       withMain: { autoCollapse: false, showPercent: true },
       errors,
     });
-    const gaps = await centred.evaluate(() => {
-      const box = document.querySelector('.ytev-box').getBoundingClientRect();
-      const track = document.querySelector('.ytev-slider').getBoundingClientRect();
-      const label = document.querySelector('.ytev-label').getBoundingClientRect();
-      const style = getComputedStyle(document.querySelector('.ytev-box'));
-      return {
-        before: label.left - track.right,
-        after: box.right - parseFloat(style.borderRightWidth || 0) - label.right,
-      };
-    });
-    await centred.close();
+    // Меряем сам текст, а не его коробку, и на «100%» — это самая широкая
+    // подпись, на ней и вылезала подрезка последнего знака.
+    const measureGaps = (fontSize) =>
+      centred.evaluate((size) => {
+        // YouTube задаёт своей строке управления собственный размер шрифта;
+        // от него зависели em внутри блока.
+        document.querySelector('.ytp-chrome-controls').style.fontSize = size + 'px';
+        const label = document.querySelector('.ytev-label');
+        label.textContent = '100%';
+        const range = document.createRange();
+        range.selectNodeContents(label);
+        const text = range.getBoundingClientRect();
+        const box = document.querySelector('.ytev-box').getBoundingClientRect();
+        const track = document.querySelector('.ytev-slider').getBoundingClientRect();
+        return { before: text.left - track.right, after: box.right - text.right };
+      }, fontSize);
+
+    const normal = await measureGaps(16);
     check(
       'проценты посередине между шкалой и краем рамки',
-      Math.abs(gaps.before - gaps.after) <= 1,
-      `слева ${gaps.before.toFixed(1)}px, справа ${gaps.after.toFixed(1)}px`
+      Math.abs(normal.before - normal.after) <= 0.5,
+      `слева ${normal.before.toFixed(1)}px, справа ${normal.after.toFixed(1)}px`
     );
+
+    // Раньше шторка процентов считала свои em от шрифта строки YouTube, а
+    // подпись — от своего: на мелком шрифте строки шторка выходила уже
+    // содержимого и срезала подпись справа.
+    const tiny = await measureGaps(9);
+    check(
+      'мелкий шрифт строки YouTube не сдвигает и не режет проценты',
+      Math.abs(tiny.before - tiny.after) <= 0.5 && tiny.after > 1,
+      `слева ${tiny.before.toFixed(1)}px, справа ${tiny.after.toFixed(1)}px`
+    );
+    await centred.close();
   }
 
   // --- значок звука не должен быть крупным -------------------------------
@@ -539,8 +557,8 @@ run('collapse: форма и длительность сворачивания',
     });
     await icon.close();
     check(
-      'значок занимает 60% кнопки, а не две трети',
-      Math.abs(size.ratio - 0.6) < 0.02,
+      'значок занимает 47.4% кнопки',
+      Math.abs(size.ratio - 0.474) < 0.02,
       `${(size.ratio * 100).toFixed(1)}% при кнопке ${size.btn}px`
     );
   }
