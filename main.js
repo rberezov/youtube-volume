@@ -621,8 +621,36 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
    * ------------------------------------------------------------------ */
 
   const MAX_BOOST_DB = 6;
+  // Признак DRC появляется на доли секунды позже loudnessDb. Решение,
+  // принятое по одному loudnessDb, успевало поднять громкость на уже
+  // нормализованном звуке: замер на переходе Shorts → обычное видео показал
+  // усиление на 553мс, признак DRC на 616мс и снятие только на 1513мс —
+  // почти секунда лишней громкости. Поэтому после смены ролика усиления не
+  // даём вовсе, пока тип дорожки не определится, и опрашиваем в это время
+  // чаще секундного тика. Окно с запасом втрое к наблюдавшимся 0.6с.
+  const LOUDNESS_SETTLE_MS = 2000;
+  const LOUDNESS_POLL_MS = 150;
   let loudnessBoost = 1;
   let loudnessKey = '';
+  let loudnessSettleUntil = 0;
+  let loudnessPollTimer = 0;
+
+  // Частый опрос живёт только внутри окна. Один опрос приходится уже после
+  // него, иначе решение ждало бы очередного секундного тика.
+  function scheduleLoudnessPoll() {
+    clearTimeout(loudnessPollTimer);
+    if (Date.now() > loudnessSettleUntil + LOUDNESS_POLL_MS) return;
+    loudnessPollTimer = setTimeout(() => {
+      loudnessPollTimer = 0;
+      refreshLoudness();
+    }, LOUDNESS_POLL_MS);
+  }
+
+  function beginLoudnessSettle() {
+    loudnessKey = '';
+    loudnessSettleUntil = Date.now() + LOUDNESS_SETTLE_MS;
+    scheduleLoudnessPoll();
+  }
 
   // Новый YouTube может отдавать отдельную DRC-дорожку («стабильная
   // громкость»): она уже сведена к цели −14 LKFS, и её собственный
@@ -677,10 +705,26 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const player = getPlayer();
     const drc = drcActive(player);
     const db = readLoudnessDb(player);
+
+    // Пока идёт окно определения дорожки, держим усиление на нуле. DRC
+    // распознаётся сразу, как только появляется, — на неё ждать нечего.
+    // Тише на секунду лучше, чем громче на секунду.
+    if (!drc && Date.now() < loudnessSettleUntil) {
+      if (loudnessBoost !== 1) {
+        loudnessBoost = 1;
+        reapplyCurve();
+      }
+      scheduleLoudnessPoll();
+      return;
+    }
+
     // Ответ плеера приходит не сразу. Пока его нет, компенсацию не трогаем:
     // скачок усиления в середине ролика слышнее, чем недобранные децибелы
     // в первые доли секунды. При активной DRC решение известно и без него.
-    if (db === null && !drc) return;
+    if (db === null && !drc) {
+      scheduleLoudnessPoll();
+      return;
+    }
     // В ключ входит и признак DRC: «стабильную громкость» можно включить
     // и выключить прямо во время ролика, и решение тогда меняется.
     const id = currentVideoId(player);
@@ -1019,6 +1063,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         enabled: SETTINGS.normalizeLoudness,
         db: readLoudnessDb(player),
         drc: drcActive(player),
+        settling: Date.now() < loudnessSettleUntil,
         boost: loudnessBoost,
         boostDb: Number((20 * Math.log10(loudnessBoost)).toFixed(2)),
         maxBoostDb: MAX_BOOST_DB,
@@ -1806,8 +1851,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // лента приходит со своим <video>, и именно на первых кадрах YouTube
     // успевает выставить mute до того, как мы восстановим состояние.
     mutedGuardUntil = Date.now() + MUTED_GUARD_MS;
-    // Новый ролик — новый уровень: заново читаем его из ответа плеера.
-    loudnessKey = '';
+    // Новый ролик — новый уровень: заново читаем его из ответа плеера,
+    // но сперва дожидаемся, пока определится тип дорожки.
+    beginLoudnessSettle();
     refreshLoudness();
     const current = Number(logicalOf(video));
     if (!validVolume(preferredVolume) && validVolume(current)) {
@@ -2455,6 +2501,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     refreshLoudness(); // ответ плеера приходит позже, чем появляется <video>
   }, 1000);
   const prepareForNavigation = () => {
+    // Переход — самый ранний сигнал смены ролика, раньше нового <video>.
+    beginLoudnessSettle();
     if (!SETTINGS.useNativeSlider) {
       setEarlyNativeHidden(true);
       beginShortsMountWait();
@@ -2496,6 +2544,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     clearTimeout(persistTimer);
     clearTimeout(earlyHideSafetyTimer);
     clearTimeout(shortsMountRetryTimer);
+    clearTimeout(loudnessPollTimer);
     for (const off of teardown.splice(0)) {
       try {
         off();

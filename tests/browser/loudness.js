@@ -99,8 +99,9 @@ run('loudness: компенсация тихих роликов', async ({ brows
     });
 
     await page.evaluate(() => document.querySelector('video').play());
-    // граф строится на playing, компенсация приезжает секундным тиком
-    await page.waitForTimeout(2200);
+    // граф строится на playing; усиление появляется только после окна
+    // определения типа дорожки (2с) — ждём с запасом
+    await page.waitForTimeout(3200);
     const gains = await page.evaluate(() => window.__gains.slice());
     const built = await page.evaluate(() => {
       const descriptor = Object.getOwnPropertyDescriptor(
@@ -231,6 +232,81 @@ run('loudness: компенсация тихих роликов', async ({ brows
       'включение DRC во время ролика снимает усиление',
       Math.abs(before - 6) < 0.01 && after === 0,
       `${before}дБ → ${after}дБ`
+    );
+  }
+
+  // Гонка из полевой проверки: при переходе Shorts → обычное видео
+  // loudnessDb приходит раньше, чем признак DRC. Раньше расширение успевало
+  // включить усиление на ~0.9с, пока очередной секундный опрос его не снимал.
+  // Теперь усиления не должно быть ни в один момент.
+  {
+    const page = await openPage(browser, {
+      withMain: { normalizeLoudness: true },
+      errors,
+      before: async (target) => {
+        await target.evaluate(
+          ([tone]) => {
+            window.__gains = [];
+            const Ctx = window.AudioContext;
+            window.AudioContext = class extends Ctx {
+              createGain() {
+                const node = super.createGain();
+                const proto = Object.getPrototypeOf(node.gain);
+                const value = Object.getOwnPropertyDescriptor(proto, 'value');
+                Object.defineProperty(node.gain, 'value', {
+                  get: () => value.get.call(node.gain),
+                  set: (next) => {
+                    window.__gains.push(next);
+                    value.set.call(node.gain, next);
+                  },
+                });
+                const setTarget = node.gain.setTargetAtTime.bind(node.gain);
+                node.gain.setTargetAtTime = (next, ...rest) => {
+                  window.__gains.push(next);
+                  return setTarget(next, ...rest);
+                };
+                return node;
+              }
+            };
+            const started = Date.now();
+            const player = document.getElementById('movie_player');
+            // loudnessDb доступен сразу...
+            player.getPlayerResponse = () => ({
+              playerConfig: { audioConfig: { loudnessDb: -1.57 } },
+            });
+            player.getVideoData = () => ({ video_id: 'race' });
+            // ...а признак DRC появляется на 600мс позже, как в замере.
+            player.getStatsForNerds = () => ({
+              volume:
+                Date.now() - started > 600
+                  ? 'DRC (cont.-14.0 dB / tgt.-14.0 dB)'
+                  : '100% / 100% (content loudness -1.57dB)',
+            });
+            const video = document.querySelector('video');
+            video.src = tone;
+            video.loop = true;
+          },
+          [TONE]
+        );
+      },
+    });
+    await page.evaluate(() => document.querySelector('video').play());
+    await page.waitForTimeout(3200);
+    const { gains, report } = await page.evaluate(() => ({
+      gains: window.__gains.slice(),
+      report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
+    }));
+    await page.close();
+    const loudest = gains.length ? Math.max(...gains) : 0;
+    check(
+      'поздний признак DRC: усиление не включалось ни на миг',
+      loudest <= BASE_GAIN + 1e-6,
+      `максимум в графе ${loudest} при базовом ${BASE_GAIN}`
+    );
+    check(
+      'поздний признак DRC: итог — без усиления',
+      report.drc === true && report.boostDb === 0,
+      JSON.stringify(report)
     );
   }
 
