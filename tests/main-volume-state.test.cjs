@@ -207,6 +207,18 @@ class ResizeObserverMock {
   disconnect() {}
 }
 
+// main.js следит за перестройкой DOM: без наблюдателя он не заметил бы ни
+// подмену <video>, ни пересборку строки управления. Держим обработчик, чтобы
+// тест мог дёрнуть обход так же, как это делает браузер.
+let domObserverCallback = null;
+class MutationObserverMock {
+  constructor(callback) {
+    domObserverCallback = callback;
+  }
+  observe() {}
+  disconnect() {}
+}
+
 const mediaSources = new WeakMap();
 class AudioNodeMock {
   constructor() {
@@ -281,6 +293,7 @@ const context = vm.createContext({
   HTMLTextAreaElement: HTMLTextAreaElementMock,
   HTMLElement: HTMLElementMock,
   Node: NodeMock,
+  MutationObserver: MutationObserverMock,
   ResizeObserver: ResizeObserverMock,
   clearInterval(id) {
     if (intervals[id - 1]) intervals[id - 1].active = false;
@@ -327,9 +340,8 @@ windowMock[Symbol.for('ytev.preload.instance.v1')] = {
 };
 
 function runMainTick() {
-  const timer = intervals.find((entry) => entry.active && entry.delay === 1000);
-  assert.ok(timer, 'the active MAIN instance must own a maintenance tick');
-  timer.callback();
+  assert.ok(domObserverCallback, 'the active MAIN instance must watch the DOM');
+  domObserverCallback([]);
 }
 
 const source = fs.readFileSync(require.resolve('../main.js'), 'utf8');
@@ -484,23 +496,35 @@ assert.equal(
 );
 
 videoA.muted = false;
-clock = 6000; // всё ещё внутри окна, открытого привязкой videoA
 videoA.mutedWrites.length = 0;
 context.navigator.userActivation.hasBeenActive = true;
 videoA.muted = true;
 assert.equal(
   videoA.mutedWrites[0],
   false,
-  "YouTube's autoplay mute must be suppressed inside the guard window"
+  "YouTube's autoplay mute must be suppressed before playback starts"
 );
 
+// Подавление снимает факт, а не часы: сколько бы времени ни прошло, пока
+// звук не пошёл, autoplay-mute всё ещё возможен и всё ещё подавляется.
 clock = 20000;
 videoA.mutedWrites.length = 0;
 videoA.muted = true;
 assert.equal(
   videoA.mutedWrites[0],
+  false,
+  'time alone must not reopen the element to autoplay mute'
+);
+
+// Звук пошёл — решение об автозапуске принято, подавлять больше нечего.
+videoA.muted = false;
+videoA.dispatchEvent(new EventMock('playing'));
+videoA.mutedWrites.length = 0;
+videoA.muted = true;
+assert.equal(
+  videoA.mutedWrites[0],
   true,
-  'after the guard window expires muted writes must pass through'
+  'once playback started muted writes must pass through'
 );
 
 // --- смена поколений ---

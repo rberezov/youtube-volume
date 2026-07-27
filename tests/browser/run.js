@@ -12,6 +12,7 @@ const HARNESSES = [
   'regress.js',
   'layout-stress.js',
   'shorts-clicks.js',
+  'dom-churn.js',
   'carryover.js',
   'mute-persist.js',
   'generation.js',

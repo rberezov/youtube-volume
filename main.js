@@ -224,9 +224,12 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       // никогда, включая честный muted-autoplay, а без него браузер
       // отклоняет play() и ролик не стартует сам. Поэтому подавляем только
       // включение mute, только пока пользователь осознанно держит звук,
-      // только первые секунды жизни элемента и только если у документа уже
-      // есть пользовательская активация — без неё незаглушённое
+      // только до фактического старта звука на этом элементе и только если у
+      // документа уже есть пользовательская активация — без неё незаглушённое
       // воспроизведение невозможно в принципе и мешать браузеру нельзя.
+      // Осознанное выключение звука (наша кнопка, клавиша m, штатная кнопка
+      // YouTube) заранее отмечает намерение и проходит сквозь подавление —
+      // раньше окно в три секунды глотало и его.
       // Обратное направление (снятие mute при preferredMuted === true)
       // сеттер не трогает: его доводит onVolumeChange через
       // restorePreferredState, на кадр позже, но без риска для автозапуска.
@@ -234,7 +237,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         requested &&
         !SETTINGS.useNativeSlider &&
         preferredMuted === false &&
-        Date.now() < mutedGuardUntil &&
+        mutedGuardOpen &&
+        !hasMutedIntent() &&
         hasUserActivation() &&
         this === getVideo();
       nativeMutedDesc.set.call(this, suppress ? false : requested);
@@ -265,9 +269,13 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // именно его — как штатная кнопка YouTube. Без этого клик снимал mute,
   // оставлял нулевую громкость и выглядел как мёртвая кнопка.
   let lastAudibleVolume = 0.5;
-  // Окно подавления autoplay-mute, переоткрывается на каждый новый <video>
-  const MUTED_GUARD_MS = 3000;
-  let mutedGuardUntil = 0;
+  // Подавление autoplay-mute. Открывается на каждый новый <video> и
+  // закрывается фактом, а не часами: как только на элементе начался звук,
+  // решение об автозапуске уже принято и подавлять нечего. Прежние три
+  // секунды были догадкой о длительности запуска — на медленной машине
+  // YouTube успевал заглушить ролик уже после окна, на быстрой окно зря
+  // висело над честными действиями пользователя.
+  let mutedGuardOpen = false;
   const hasUserActivation = () =>
     typeof navigator === 'object' &&
     !!navigator &&
@@ -1933,14 +1941,16 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   function unbindVideo() {
     if (!videoBinding) return;
-    const { video, onVolumeChange, restoreAfterMediaChange, onMediaProgress } =
+    const { video, onVolumeChange, restoreAfterMediaChange, onMediaProgress, onPlaying } =
       videoBinding;
     video.removeEventListener('volumechange', onVolumeChange);
     video.removeEventListener('loadedmetadata', restoreAfterMediaChange);
     video.removeEventListener('playing', restoreAfterMediaChange);
+    video.removeEventListener('playing', onPlaying);
     for (const type of LOUDNESS_EVENTS) video.removeEventListener(type, onMediaProgress);
     videoBinding = null;
     boundVideo = null;
+    mutedGuardOpen = false;
   }
 
   function bindVideo() {
@@ -1950,10 +1960,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     unbindVideo();
     boundVideo = video;
     if (isShorts()) beginShortsMountWait();
-    // Новый элемент — новое окно подавления autoplay-mute: в Shorts каждая
-    // лента приходит со своим <video>, и именно на первых кадрах YouTube
-    // успевает выставить mute до того, как мы восстановим состояние.
-    mutedGuardUntil = Date.now() + MUTED_GUARD_MS;
+    // Новый элемент — снова подавляем autoplay-mute: в Shorts каждая лента
+    // приходит со своим <video>, и именно на первых кадрах YouTube успевает
+    // выставить mute до того, как мы восстановим состояние.
+    mutedGuardOpen = true;
     // Новый ролик — новый уровень: прежнее решение снимаем сразу, новое
     // появится, как только снимок станет согласованным.
     resetLoudness();
@@ -1992,16 +2002,27 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         updateUI();
       }, 0);
     };
+    // Звук пошёл — решение об автозапуске принято, и подавлять больше нечего.
+    const onPlaying = () => {
+      if (video === boundVideo) mutedGuardOpen = false;
+    };
     // Решение о выравнивании обновляем по событиям самой дорожки, а не по
     // часам: именно к этим моментам плеер и досоздаёт то, чего не хватало
     // снимку. Секундный тик остаётся страховкой.
     const onMediaProgress = () => {
       if (video === boundVideo) refreshLoudness();
     };
-    videoBinding = { video, onVolumeChange, restoreAfterMediaChange, onMediaProgress };
+    videoBinding = {
+      video,
+      onVolumeChange,
+      restoreAfterMediaChange,
+      onMediaProgress,
+      onPlaying,
+    };
     video.addEventListener('volumechange', onVolumeChange);
     video.addEventListener('loadedmetadata', restoreAfterMediaChange);
     video.addEventListener('playing', restoreAfterMediaChange);
+    video.addEventListener('playing', onPlaying);
     for (const type of LOUDNESS_EVENTS) video.addEventListener(type, onMediaProgress);
     updateUI();
   }
@@ -2068,6 +2089,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     shortsMountWaitUntil = Date.now() + SHORTS_NATIVE_MOUNT_GRACE_MS;
   }
 
+  // Появление штатной строки — обычная мутация DOM, её ловит наблюдатель и
+  // сразу зовёт ensureUI(). Поэтому опрос каждые 80мс отсюда ушёл, остался
+  // один срок: если строка так и не пришла, по нему встаём в накладной слой.
   function waitForShortsNativeMount() {
     if (!isShorts()) return false;
     const remaining = shortsMountWaitUntil - Date.now();
@@ -2076,7 +2100,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     shortsMountRetryTimer = setTimeout(() => {
       shortsMountRetryTimer = 0;
       ensureUI();
-    }, Math.min(80, remaining));
+    }, remaining);
     return true;
   }
 
@@ -2599,17 +2623,64 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   applyTrustedPayload(initialPayload, true);
 
-  // YouTube — SPA: плеер может появляться/пересоздаваться при навигации.
-  const tick = setInterval(() => {
+  /* ------------------------------------------------------------------ *
+   * YouTube — SPA: плеер, <video> и строка управления пересоздаются на ходу.
+   * Раньше их искал опрос раз в секунду. Теперь смотрим на сам факт
+   * перестройки: появление и исчезновение узла — это всегда childList-мутация,
+   * поэтому наблюдатель видит строго больше, чем видел опрос, и видит сразу,
+   * а не в среднем через полсекунды.
+   * ------------------------------------------------------------------ */
+
+  // Можно ли улучшить текущее место блока. В Shorts штатная строка кнопок
+  // появляется позже видео: если мы уже стоим в накладном слое, а строка
+  // подъехала, стоит перебраться в неё.
+  function uiCanImprove() {
+    return !!(ui && ui.overlay && isShorts() && !shortsRowUnusable && shortsVolumeHost());
+  }
+
+  function sweep() {
     // YouTube регулярно заменяет <video> в Shorts. Не оставляем старые
     // слушатели и JS-ссылки жить до конца вкладки.
     for (const [el, node] of audio.liveNodes) {
       if (!el.isConnected) fallbackToDirect(el, node);
     }
-    bindVideo();
-    ensureUI();
-    refreshLoudness(); // ответ плеера приходит позже, чем появляется <video>
-  }, 1000);
+    bindVideo(); // сам перечитает уровень ролика, если элемент сменился
+    // ensureUI() перестраивает интерфейс и делает замеры геометрии, поэтому
+    // на каждую мутацию его звать нельзя — получилась бы взбивка лейаута.
+    // Зовём, только когда блока действительно нет на месте.
+    if (SETTINGS.useNativeSlider || !ui || !ui.box.isConnected || uiCanImprove()) {
+      ensureUI();
+    }
+    // refreshLoudness() здесь намеренно нет: getStatsForNerds() и
+    // getPlayerResponse() недёшевы, а страница у YouTube шевелится постоянно.
+    // Уровень перечитывают события самой дорожки, навигация и bindVideo() —
+    // то есть всё, после чего он может измениться.
+  }
+
+  let sweepQueued = false;
+  let sweepTimer = 0;
+  // Склейка через setTimeout, а не requestAnimationFrame: в фоновой вкладке
+  // кадров нет вовсе, а Shorts там продолжают листаться — и новый ролик
+  // остался бы без сохранённой громкости до возвращения на вкладку.
+  // Флаг снимается внутри обработчика, а не в sweep(): иначе достаточно было
+  // бы синхронного setTimeout, чтобы порядок присваиваний оставил флаг
+  // поднятым навсегда и обходы прекратились.
+  function scheduleSweep() {
+    if (sweepQueued) return;
+    sweepQueued = true;
+    sweepTimer = setTimeout(() => {
+      sweepQueued = false;
+      sweepTimer = 0;
+      sweep();
+    }, 0);
+  }
+  // Проверка типа — как у ResizeObserver рядом: сам код не должен падать
+  // там, где среда беднее браузера.
+  const domObserver =
+    typeof MutationObserver === 'function' ? new MutationObserver(scheduleSweep) : null;
+  if (domObserver) {
+    domObserver.observe(document.documentElement, { childList: true, subtree: true });
+  }
   const prepareForNavigation = () => {
     // Переход — самый ранний сигнал смены ролика, раньше нового <video>.
     resetLoudness();
@@ -2648,7 +2719,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // только до того, как оно захватит дескрипторы: сначала мы возвращаем
   // нативные volume/muted, потом преемник берёт их уже чистыми.
   function disposeInstance() {
-    clearInterval(tick);
+    if (domObserver) domObserver.disconnect();
+    clearTimeout(sweepTimer);
     clearTimeout(saveVolumeTimer);
     clearTimeout(saveMutedTimer);
     clearTimeout(persistTimer);
