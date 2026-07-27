@@ -210,6 +210,41 @@ run('collapse: форма и длительность сворачивания',
     );
   }
 
+  // --- начало шкалы стоит на месте ---------------------------------------
+  // Пока промежуток между значком и шкалой был gap самой рамки, он менялся
+  // вместе со сворачиванием — и левый край дорожки уезжал вправо на эти же
+  // пиксели, пока шторка открывалась. Отступ перенесён внутрь шторки, и
+  // край обязан стоять неподвижно от первого кадра до последнего.
+  {
+    const anchored = await openPage(browser, { withMain: { autoCollapse: true }, errors });
+    const lefts = await anchored.evaluate(async () => {
+      const box = document.querySelector('.ytev-box');
+      const input = document.querySelector('.ytev-slider');
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+
+      document.querySelector('.ytp-left-controls').dispatchEvent(new MouseEvent('mouseleave'));
+      while (box.classList.contains('ytev-animating')) await frame();
+
+      box.dispatchEvent(new MouseEvent('mouseenter'));
+      const samples = [];
+      for (let i = 0; i < 20; i += 1) {
+        await frame();
+        const slot = document.querySelector('.ytev-slot').getBoundingClientRect();
+        // Пока шторка ещё нулевой ширины, края дорожки на экране нет —
+        // такие кадры в сравнение не берём.
+        if (slot.width > 0.5) samples.push(input.getBoundingClientRect().left);
+      }
+      return samples;
+    });
+    await anchored.close();
+    const spread = Math.max(...lefts) - Math.min(...lefts);
+    check(
+      'левый край шкалы не двигается при разворачивании',
+      lefts.length > 3 && spread < 0.5,
+      `разброс ${spread.toFixed(2)}px по ${lefts.length} кадрам`
+    );
+  }
+
   // --- бегунок не должен обрезаться обёрткой -----------------------------
   // Дорожка 4px, а бегунок 13px и торчит за её пределы. Пока обёртка была
   // высотой по содержимому, overflow: hidden срезал его сверху и снизу —
