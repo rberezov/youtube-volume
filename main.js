@@ -1368,8 +1368,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       /* У штатной кнопки YouTube SVG 24×24 внутри зоны 36×36 — это 66.7%.
          Наша рамка ниже штатной пилюли, и в ней тот же значок смотрелся
          крупновато, поэтому доля заметно меньше. */
-      width: 50.7%;
-      height: 50.7%;
+      width: 55.1%;
+      height: 55.1%;
       display: block;
       overflow: visible;
     }
