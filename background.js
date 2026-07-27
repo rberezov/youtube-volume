@@ -51,6 +51,29 @@ function updateYouTubeVolumeMain(secret, payload) {
   return instance.update(secret, payload);
 }
 
+// main.js работает в MAIN-мире страницы, где chrome.i18n недоступен, поэтому
+// подписи собираются здесь и уезжают готовыми в том же payload, что настройки.
+// Шаблоны с подстановкой отдаём как есть: значения в них подставляет уже
+// main.js, когда знает проценты.
+const STRING_KEYS = [
+  'playerSliderLabel',
+  'playerUnmute',
+  'playerMute',
+  'playerTooltip',
+  'playerTooltipWithOutput',
+];
+
+function uiStrings() {
+  const strings = {};
+  for (const key of STRING_KEYS) {
+    try {
+      const value = chrome.i18n.getMessage(key);
+      if (value) strings[key] = value;
+    } catch {}
+  }
+  return strings;
+}
+
 async function initialize(sender, channel, secret) {
   const [settings, state] = await Promise.all([
     storageGet('sync', DEFAULTS),
@@ -60,7 +83,7 @@ async function initialize(sender, channel, secret) {
     target: targetFrom(sender),
     world: 'MAIN',
     func: youtubeVolumeMain,
-    args: [{ channel, settings, state }, secret],
+    args: [{ channel, settings, state, strings: uiStrings() }, secret],
   });
   return results.some((result) => result && result.result === true);
 }
@@ -71,7 +94,7 @@ async function updateSettings(sender, secret) {
     target: targetFrom(sender),
     world: 'MAIN',
     func: updateYouTubeVolumeMain,
-    args: [secret, { settings }],
+    args: [secret, { settings, strings: uiStrings() }],
   });
   return results.some((result) => result && result.result === true);
 }

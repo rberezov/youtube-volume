@@ -107,6 +107,31 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     }
   }
 
+  // Подписи приходят готовыми из service worker: chrome.i18n в MAIN-мире нет.
+  // Значения по умолчанию русские и остаются на случай неполного payload —
+  // пустая подпись у кнопки хуже непереведённой.
+  const STRINGS = {
+    playerSliderLabel: 'Громкость',
+    playerUnmute: 'Включить звук (m)',
+    playerMute: 'Отключить звук (m)',
+    playerTooltip: 'Громкость: $VALUE$',
+    playerTooltipWithOutput: 'Громкость: $VALUE$ (на выходе ≈ $OUTPUT$)',
+  };
+
+  function applyStrings(value) {
+    if (!value || typeof value !== 'object') return;
+    for (const key of Object.keys(STRINGS)) {
+      if (typeof value[key] === 'string' && value[key]) STRINGS[key] = value[key];
+    }
+  }
+
+  // Подстановка как в chrome.i18n: $VALUE$ и $OUTPUT$ в шаблоне из локали.
+  const format = (template, values) =>
+    String(template).replace(/\$([A-Z]+)\$/g, (whole, name) => {
+      const key = name.toLowerCase();
+      return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : whole;
+    });
+
   function applySettings(value) {
     if (!value || typeof value !== 'object') return;
     for (const key of ['enabled', 'showPercent', 'autoCollapse', 'useNativeSlider']) {
@@ -839,6 +864,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   function applyTrustedPayload(payload, includeState = false) {
     if (!payload || typeof payload !== 'object') return false;
     applySettings(payload.settings);
+    applyStrings(payload.strings);
     if (!volumeStateLoaded) {
       const state =
         includeState && payload.state && typeof payload.state === 'object'
@@ -1237,14 +1263,14 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const state = muted ? 'muted' : pct < 50 ? 'low' : 'high';
     ui.box.dataset.vol = state;
     if (ui.muteBtn) {
-      const title = muted ? 'Включить звук (m)' : 'Отключить звук (m)';
+      const title = muted ? STRINGS.playerUnmute : STRINGS.playerMute;
       ui.muteBtn.title = title;
       ui.muteBtn.setAttribute('aria-label', title);
     }
     const real = toReal(pct / 100) * 100;
     ui.slider.title = SETTINGS.enabled
-      ? `Громкость: ${fmt(pct)} (на выходе ≈ ${fmt(real)})`
-      : `Громкость: ${fmt(pct)}`;
+      ? format(STRINGS.playerTooltipWithOutput, { value: fmt(pct), output: fmt(real) })
+      : format(STRINGS.playerTooltip, { value: fmt(pct) });
   }
 
   /* ------------------------------------------------------------------ *
@@ -2176,7 +2202,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     slider.max = '100';
     slider.step = '0.1';
     slider.className = 'ytev-slider';
-    slider.setAttribute('aria-label', 'Громкость');
+    slider.setAttribute('aria-label', STRINGS.playerSliderLabel);
 
     const label = document.createElement('span');
     label.className = 'ytev-label';

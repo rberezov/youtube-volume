@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Точная громкость YouTube</title>
+  <title data-i18n="appShortName">Точная громкость</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <header class="header">
     <img class="app-icon" src="icons/icon-48.png" alt="">
     <div class="header-copy">
-      <h1>Точная громкость</h1>
-      <p>YouTube Exponential Volume</p>
+      <h1 data-i18n="appShortName">Точная громкость</h1>
+      <p data-i18n="appName">YouTube Exponential Volume</p>
     </div>
   </header>
 
@@ -19,8 +19,8 @@
     <section class="card master-card" aria-labelledby="enabledTitle">
       <label class="switch-row switch-row--master" for="enabled">
         <span class="switch-copy">
-          <span class="switch-title" id="enabledTitle">Экспоненциальная громкость</span>
-          <span class="switch-description">Точная регулировка на низкой громкости</span>
+          <span class="switch-title" id="enabledTitle" data-i18n="enabledTitle">Экспоненциальная громкость</span>
+          <span class="switch-description" data-i18n="enabledDescription">Точная регулировка на низкой громкости</span>
         </span>
         <span class="switch">
           <input type="checkbox" id="enabled">
@@ -32,16 +32,16 @@
     <section class="card" aria-labelledby="curveTitle">
       <div class="section-heading">
         <div>
-          <h2 id="curveTitle">Точность тихого звука</h2>
+          <h2 id="curveTitle" data-i18n="curveTitle">Точность тихого звука</h2>
         </div>
         <output class="value-badge" id="gammaValue" for="gamma"></output>
       </div>
-      <label class="sr-only" for="gamma">Точность регулировки тихого звука</label>
+      <label class="sr-only" for="gamma" data-i18n="curveLabel">Точность регулировки тихого звука</label>
       <input class="range" type="range" id="gamma" min="1" max="6" step="0.1">
       <div class="range-labels" aria-hidden="true">
-        <span>Как в YouTube</span>
-        <span>Оптимально: 3</span>
-        <span>Больше точности</span>
+        <span data-i18n="curveRangeLow">Как в YouTube</span>
+        <span data-i18n="curveRangeMid">Оптимально: 3</span>
+        <span data-i18n="curveRangeHigh">Больше точности</span>
       </div>
       <p class="curve-example" id="curveExample"></p>
     </section>
@@ -49,15 +49,15 @@
     <section class="card own-only" aria-labelledby="sizeTitle">
       <div class="section-heading section-heading--compact">
         <div>
-          <h2 id="sizeTitle">Размер ползунка</h2>
-          <p>Отдельно для обычных видео и Shorts.</p>
+          <h2 id="sizeTitle" data-i18n="sizeTitle">Размер ползунка</h2>
+          <p data-i18n="sizeDescription">Отдельно для обычных видео и Shorts.</p>
         </div>
       </div>
 
       <div class="range-grid">
         <div class="range-setting">
           <div class="range-setting__heading">
-            <label for="sliderScale">Обычное видео</label>
+            <label for="sliderScale" data-i18n="sizeVideo">Обычное видео</label>
             <output class="value-badge value-badge--small" id="scaleValue" for="sliderScale"></output>
           </div>
           <input class="range" type="range" id="sliderScale" min="2" max="70" step="1">
@@ -65,7 +65,7 @@
 
         <div class="range-setting">
           <div class="range-setting__heading">
-            <label for="shortsScale">Shorts</label>
+            <label for="shortsScale" data-i18n="sizeShorts">Shorts</label>
             <output class="value-badge value-badge--small" id="shortsValue" for="shortsScale"></output>
           </div>
           <input class="range" type="range" id="shortsScale" min="2" max="70" step="1">
@@ -74,12 +74,12 @@
     </section>
 
     <section class="card" aria-labelledby="behaviorTitle">
-      <h2 id="behaviorTitle">Поведение</h2>
+      <h2 id="behaviorTitle" data-i18n="behaviorTitle">Поведение</h2>
 
       <label class="switch-row own-only" for="showPercent">
         <span class="switch-copy">
-          <span class="switch-title">Показывать проценты</span>
-          <span class="switch-description">Точное значение рядом со шкалой</span>
+          <span class="switch-title" data-i18n="showPercentTitle">Показывать проценты</span>
+          <span class="switch-description" data-i18n="showPercentDescription">Точное значение рядом со шкалой</span>
         </span>
         <span class="switch">
           <input type="checkbox" id="showPercent">
@@ -89,8 +89,8 @@
 
       <label class="switch-row own-only" for="autoCollapse">
         <span class="switch-copy">
-          <span class="switch-title">Сворачивать автоматически</span>
-          <span class="switch-description">Компактный вид без курсора</span>
+          <span class="switch-title" data-i18n="autoCollapseTitle">Сворачивать автоматически</span>
+          <span class="switch-description" data-i18n="autoCollapseDescription">Компактный вид без курсора</span>
         </span>
         <span class="switch">
           <input type="checkbox" id="autoCollapse">
@@ -100,8 +100,8 @@
 
       <label class="switch-row" for="useNativeSlider">
         <span class="switch-copy">
-          <span class="switch-title">Использовать шкалу YouTube</span>
-          <span class="switch-description">Скрыть ползунок расширения</span>
+          <span class="switch-title" data-i18n="useNativeTitle">Использовать шкалу YouTube</span>
+          <span class="switch-description" data-i18n="useNativeDescription">Скрыть ползунок расширения</span>
         </span>
         <span class="switch">
           <input type="checkbox" id="useNativeSlider">
@@ -114,9 +114,9 @@
   <footer class="footer">
     <span class="save-status" id="saveStatus" role="status" aria-live="polite">
       <span class="save-dot" aria-hidden="true"></span>
-      <span id="saveStatusText">Сохранено</span>
+      <span id="saveStatusText" data-i18n="saveSaved">Сохранено</span>
     </span>
-    <button class="reset-button" id="resetSettings" type="button">Сбросить</button>
+    <button class="reset-button" id="resetSettings" type="button" data-i18n="resetButton">Сбросить</button>
   </footer>
 
   <script src="popup.js"></script>

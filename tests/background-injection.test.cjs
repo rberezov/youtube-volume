@@ -17,6 +17,11 @@ const chromeMock = {
       },
     },
   },
+  i18n: {
+    getMessage(key) {
+      return key === 'playerMute' ? 'Mute (m)' : `msg:${key}`;
+    },
+  },
   scripting: {
     async executeScript(details) {
       injections.push(details);
@@ -102,6 +107,14 @@ async function run() {
   assert.equal(injections[0].args[0].channel, channel);
   assert.equal(injections[0].args[0].settings.gamma, 2.5);
   assert.equal(injections[0].args[0].state.savedVolume, 0.42);
+  // main.js работает в MAIN-мире, где chrome.i18n недоступен: подписи обязаны
+  // уехать готовыми вместе с настройками, иначе кнопка останется без текста.
+  assert.equal(
+    injections[0].args[0].strings.playerMute,
+    'Mute (m)',
+    'localized strings must travel in the injection payload'
+  );
+  assert.equal(injections[0].args[0].strings.playerSliderLabel, 'msg:playerSliderLabel');
   assert.equal(injections[0].args[1], secret);
 
   let updateResponse;

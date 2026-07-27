@@ -1,13 +1,14 @@
 {
   "name": "youtube-exponential-volume",
-  "version": "1.14.3",
+  "version": "1.15.0",
   "private": true,
   "description": "Chrome-расширение: экспоненциальная регулировка громкости в YouTube и удлинённый точный ползунок",
   "scripts": {
     "lint": "node --check background.js && node --check bridge.js && node --check main.js && node --check popup.js && node --check preload.js",
     "test": "npm run lint && npm run test:unit && npm run test:browser",
     "test:unit": "node --test tests/*.test.cjs",
-    "test:browser": "node tests/browser/run.js"
+    "test:browser": "node tests/browser/run.js",
+    "package": "node tools/package.js"
   },
   "devDependencies": {
     "playwright": "^1.56.1"

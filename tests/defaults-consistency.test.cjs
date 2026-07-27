@@ -84,4 +84,29 @@ for (const [id, value] of [
   );
 }
 
+// Версия объявлена в манифесте и в package.json; сборщик пакета откажется
+// работать при расхождении, но поймать его лучше на тестах, а не при выкладке.
+const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+assert.equal(
+  manifest.version,
+  pkg.version,
+  `версии разошлись: manifest.json ${manifest.version}, package.json ${pkg.version}`
+);
+
+// Файлы, которые перечислены в манифесте, обязаны существовать: опечатка в
+// имени скрипта ломает расширение только при установке.
+const referenced = [
+  manifest.background.service_worker,
+  manifest.action.default_popup,
+  ...manifest.content_scripts.flatMap((entry) => entry.js),
+  ...Object.values(manifest.icons),
+];
+for (const file of referenced) {
+  assert.ok(
+    fs.existsSync(path.join(ROOT, file)),
+    `manifest.json ссылается на несуществующий файл ${file}`
+  );
+}
+
 console.log('defaults consistency test passed');
