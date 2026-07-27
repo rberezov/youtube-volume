@@ -45,13 +45,13 @@ run('loudness: компенсация тихих роликов', async ({ brows
   const { check } = reporter;
 
   // Возвращает последнее усиление, доехавшее до GainNode.
-  async function measure({ loudnessDb, normalize, withReport = false }) {
+  async function measure({ loudnessDb, normalize, drc = false, withReport = false }) {
     const page = await openPage(browser, {
       withMain: { normalizeLoudness: normalize },
       errors,
       before: async (target) => {
         await target.evaluate(
-          ([db, tone]) => {
+          ([db, tone, drcActive]) => {
             // 1. Записываем всё, что уходит в усиление.
             window.__gains = [];
             const Ctx = window.AudioContext;
@@ -81,12 +81,19 @@ run('loudness: компенсация тихих роликов', async ({ brows
               playerConfig: { audioConfig: { loudnessDb: db } },
             });
             player.getVideoData = () => ({ video_id: 'test' + db });
+            // Статистика плеера: при активной DRC-дорожке в строке
+            // громкости YouTube пишет DRC и уже сведённые cont./tgt.
+            player.getStatsForNerds = () => ({
+              volume: drcActive
+                ? 'DRC (cont.-14.0 dB / tgt.-14.0 dB)'
+                : '100% / 74% (content loudness 2.6dB)',
+            });
             // 3. Реально играющий элемент — иначе граф не построится.
             const video = document.querySelector('video');
             video.src = tone;
             video.loop = true;
           },
-          [loudnessDb, TONE]
+          [loudnessDb, TONE, drc]
         );
       },
     });
@@ -158,6 +165,74 @@ run('loudness: компенсация тихих роликов', async ({ brows
     reported.report && Math.abs(reported.report.boostDb - 6) < 0.01,
     JSON.stringify(reported.report)
   );
+
+  // Находка полевой проверки на Cmp99FbMSqY: YouTube отдал DRC-дорожку,
+  // уже сведённую к −14 LKFS, а playerConfig.audioConfig.loudnessDb остался
+  // от исходной (−12.7дБ). Усиление поверх этого — двойная нормализация.
+  const drcQuiet = await measure({ loudnessDb: -12.7, normalize: true, drc: true });
+  check(
+    'при активной DRC-дорожке усиления нет',
+    drcQuiet.last !== null && Math.abs(drcQuiet.last - BASE_GAIN) < 1e-6,
+    `${drcQuiet.last} против ожидаемого ${BASE_GAIN}`
+  );
+
+  const drcReport = await measure({
+    loudnessDb: -12.7,
+    normalize: true,
+    drc: true,
+    withReport: true,
+  });
+  check(
+    'диагностика сообщает про DRC',
+    drcReport.report && drcReport.report.drc === true && drcReport.report.boostDb === 0,
+    JSON.stringify(drcReport.report)
+  );
+
+  // «Стабильную громкость» можно включить прямо во время ролика: решение
+  // должно пересчитаться, а не залипнуть на прежнем усилении.
+  {
+    const page = await openPage(browser, {
+      withMain: { normalizeLoudness: true },
+      errors,
+      before: async (target) => {
+        await target.evaluate(
+          ([tone]) => {
+            window.__drc = false;
+            const player = document.getElementById('movie_player');
+            player.getPlayerResponse = () => ({
+              playerConfig: { audioConfig: { loudnessDb: -6 } },
+            });
+            player.getVideoData = () => ({ video_id: 'toggle' });
+            player.getStatsForNerds = () => ({
+              volume: window.__drc
+                ? 'DRC (cont.-14.0 dB / tgt.-14.0 dB)'
+                : '100% / 100% (content loudness -6.0dB)',
+            });
+            const video = document.querySelector('video');
+            video.src = tone;
+            video.loop = true;
+          },
+          [TONE]
+        );
+      },
+    });
+    await page.evaluate(() => document.querySelector('video').play());
+    await page.waitForTimeout(2200);
+    const before = await page.evaluate(() =>
+      window[Symbol.for('ytev.main.instance.v2')].loudness().boostDb
+    );
+    await page.evaluate(() => (window.__drc = true));
+    await page.waitForTimeout(1600); // решение обновляет секундный тик
+    const after = await page.evaluate(() =>
+      window[Symbol.for('ytev.main.instance.v2')].loudness().boostDb
+    );
+    await page.close();
+    check(
+      'включение DRC во время ролика снимает усиление',
+      Math.abs(before - 6) < 0.01 && after === 0,
+      `${before}дБ → ${after}дБ`
+    );
+  }
 
   const missing = await measure({ loudnessDb: null, normalize: true });
   check(

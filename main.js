@@ -622,7 +622,25 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   const MAX_BOOST_DB = 6;
   let loudnessBoost = 1;
-  let loudnessVideoId = '';
+  let loudnessKey = '';
+
+  // Новый YouTube может отдавать отдельную DRC-дорожку («стабильная
+  // громкость»): она уже сведена к цели −14 LKFS, и её собственный
+  // loudnessDb равен нулю. А playerConfig.audioConfig.loudnessDb остаётся
+  // от исходной дорожки — по нему мы добавляли усиление поверх уже
+  // нормализованного звука. Это двойная нормализация: на ролике с
+  // «DRC (cont.−14.0 dB / tgt.−14.0 dB)» расширение читало −12.7дБ и
+  // накидывало ещё +6дБ. Признак активной DRC-дорожки — слово DRC в
+  // строке громкости из статистики плеера.
+  function drcActive(player) {
+    if (!player || typeof player.getStatsForNerds !== 'function') return false;
+    try {
+      const stats = player.getStatsForNerds();
+      return /\bDRC\b/.test(String(stats && stats.volume));
+    } catch {
+      return false;
+    }
+  }
 
   function readLoudnessDb(player) {
     if (!player || typeof player.getPlayerResponse !== 'function') return null;
@@ -649,7 +667,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   function refreshLoudness() {
     if (!SETTINGS.normalizeLoudness) {
-      loudnessVideoId = '';
+      loudnessKey = '';
       if (loudnessBoost !== 1) {
         loudnessBoost = 1;
         reapplyCurve();
@@ -657,15 +675,19 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       return;
     }
     const player = getPlayer();
+    const drc = drcActive(player);
     const db = readLoudnessDb(player);
     // Ответ плеера приходит не сразу. Пока его нет, компенсацию не трогаем:
     // скачок усиления в середине ролика слышнее, чем недобранные децибелы
-    // в первые доли секунды.
-    if (db === null) return;
+    // в первые доли секунды. При активной DRC решение известно и без него.
+    if (db === null && !drc) return;
+    // В ключ входит и признак DRC: «стабильную громкость» можно включить
+    // и выключить прямо во время ролика, и решение тогда меняется.
     const id = currentVideoId(player);
-    if (id && id === loudnessVideoId) return;
-    loudnessVideoId = id;
-    const boostDb = db < 0 ? Math.min(MAX_BOOST_DB, -db) : 0;
+    const key = `${id}|${drc ? 'drc' : 'raw'}`;
+    if (id && key === loudnessKey) return;
+    loudnessKey = key;
+    const boostDb = drc || db === null || db >= 0 ? 0 : Math.min(MAX_BOOST_DB, -db);
     const next = Math.pow(10, boostDb / 20);
     if (Math.abs(next - loudnessBoost) < 1e-6) return;
     loudnessBoost = next;
@@ -992,9 +1014,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // для сисадминов»: там то же значение подписано как content loudness.
     // Ничего закрытого не отдаёт — уровень ролика странице и так известен.
     loudness() {
+      const player = getPlayer();
       return {
         enabled: SETTINGS.normalizeLoudness,
-        db: readLoudnessDb(getPlayer()),
+        db: readLoudnessDb(player),
+        drc: drcActive(player),
         boost: loudnessBoost,
         boostDb: Number((20 * Math.log10(loudnessBoost)).toFixed(2)),
         maxBoostDb: MAX_BOOST_DB,
@@ -1783,7 +1807,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // успевает выставить mute до того, как мы восстановим состояние.
     mutedGuardUntil = Date.now() + MUTED_GUARD_MS;
     // Новый ролик — новый уровень: заново читаем его из ответа плеера.
-    loudnessVideoId = '';
+    loudnessKey = '';
     refreshLoudness();
     const current = Number(logicalOf(video));
     if (!validVolume(preferredVolume) && validVolume(current)) {
