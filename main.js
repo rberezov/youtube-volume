@@ -112,8 +112,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // пустая подпись у кнопки хуже непереведённой.
   const STRINGS = {
     playerSliderLabel: 'Громкость',
-    playerUnmute: 'Включить звук (m)',
-    playerMute: 'Отключить звук (m)',
+    playerUnmute: 'Включить звук',
+    playerMute: 'Отключить звук',
   };
 
   function applyStrings(value) {
@@ -1254,9 +1254,12 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const state = muted ? 'muted' : pct < 50 ? 'low' : 'high';
     ui.box.dataset.vol = state;
     if (ui.muteBtn) {
-      const title = muted ? STRINGS.playerUnmute : STRINGS.playerMute;
-      ui.muteBtn.title = title;
-      ui.muteBtn.setAttribute('aria-label', title);
+      // Только aria-label: всплывающей подсказки у кнопки нет, она
+      // перекрывала бы плеер. Клавиша озвучивается через aria-keyshortcuts.
+      ui.muteBtn.setAttribute(
+        'aria-label',
+        muted ? STRINGS.playerUnmute : STRINGS.playerMute
+      );
     }
   }
 

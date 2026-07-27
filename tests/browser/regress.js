@@ -70,6 +70,22 @@ run('regress: сборка, жесты, режимы, Shorts', async ({ browser,
     'логическая громкость = позиция ползунка',
     Math.abs((await videoVolume(page)) * 100 - (await sliderValue(page))) < 0.2
   );
+
+  // Всплывающих подсказок у блока быть не должно: они перекрывают плеер.
+  // Доступность держится на aria-label и aria-valuetext, а не на title.
+  const titles = await page.evaluate(() =>
+    [...document.querySelectorAll('.ytev-box [title], .ytev-box[title]')].map(
+      (node) => `${node.className}="${node.getAttribute('title')}"`
+    )
+  );
+  check('у блока нет всплывающих подсказок', titles.length === 0, titles.join(', '));
+  check(
+    'кнопка звука подписана для доступности',
+    await page.evaluate(() => {
+      const button = document.querySelector('.ytev-mute');
+      return !!button && !!button.getAttribute('aria-label');
+    })
+  );
   await page.close();
 
   reporter.section('режимы');

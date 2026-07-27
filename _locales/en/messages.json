@@ -92,11 +92,11 @@
     "description": "Label of the extension slider in the player"
   },
   "playerUnmute": {
-    "message": "Unmute (m)",
-    "description": "Button tooltip while the sound is off"
+    "message": "Unmute",
+    "description": "Button label while the sound is off"
   },
   "playerMute": {
-    "message": "Mute (m)",
-    "description": "Button tooltip while the sound is on"
+    "message": "Mute",
+    "description": "Button label while the sound is on"
   }
 }
