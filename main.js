@@ -1248,9 +1248,11 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
          последний знак подрезался. */
       --ytev-pct: 2.7em;
       --ytev-gap: 0px;
-      /* Тень как у штатных контролов YouTube: мягкая, чуть вниз. Она нужна
-         не для красоты — светлый значок на светлом кадре без неё теряется. */
-      --ytev-shadow: drop-shadow(0 1px 2px rgb(0 0 0 / 50%));
+      /* Ровно то, что YouTube ставит своим значкам (снято с живой строки
+         Shorts): широкое мягкое размытие и слабая непрозрачность, поэтому
+         смещение в один пиксель на глаз не читается. Своя прежняя тень с
+         размытием 2px при 50% выглядела заметно направленной вниз. */
+      --ytev-shadow: drop-shadow(0 1px 4px rgb(0 0 0 / 30%));
       display: flex;
       align-items: center;
       align-self: center;
@@ -1361,7 +1363,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     .ytev-box:not(.ytev-framed) .ytev-mute { height: 36px; }
     .ytev-mute svg,
     .ytev-slider { filter: var(--ytev-shadow); }
-    .ytev-label { text-shadow: 0 1px 2px rgb(0 0 0 / 50%); }
+    .ytev-label { text-shadow: 0 1px 4px rgb(0 0 0 / 30%); }
     .ytev-mute svg {
       /* У штатной кнопки YouTube SVG 24×24 внутри зоны 36×36 — это 66.7%.
          Наша рамка ниже штатной пилюли, и в ней тот же значок смотрелся
@@ -1874,8 +1876,15 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const box = ui.box.getBoundingClientRect(); // замер после обнуления
     const before = renderedNeighbour(true);
     const after = renderedNeighbour(false);
+    // Поле умеет и вычитать: лишний зазор бывает не только от чужих полей.
+    // В строке Shorts штатный <volume-controls> остаётся нулевым по ширине,
+    // но всё ещё элементом flex-строки, и собирает её gap с обеих сторон —
+    // одним лишь неотрицательным полем эти восемь пикселей не убрать.
+    // Ограничиваем одним ритмом, чтобы блок не наехал на соседа.
     const need = (actual) =>
-      (actual == null ? target : Math.max(0, Math.round(target - actual))) + 'px';
+      (actual == null
+        ? target
+        : Math.max(-target, Math.min(target, Math.round(target - actual)))) + 'px';
     st.marginLeft = need(before && box.left - before.right);
     st.marginRight = need(after && after.left - box.right);
   }

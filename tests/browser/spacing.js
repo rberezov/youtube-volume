@@ -150,4 +150,39 @@ run('spacing: зазор до соседней кнопки', async ({ browser, 
     Math.abs(squashed.value - EXPECTED) <= 1 && !squashed.anchorInFlow,
     `${squashed.value}px, якорь ${squashed.anchorInFlow ? 'в потоке' : 'вне потока'}`
   );
+
+  // --- якорь остался в строке ---------------------------------------------
+  // Снято с живой строки Shorts: скрыты оказались только потомки
+  // <volume-controls>, а сам он остался элементом flex-строки. Ширины у него
+  // нет, но gap строки он собирает с обеих сторон — 8 + 0 + 8. Неотрицательным
+  // полем это не убрать, поэтому поле умеет и вычитать.
+  {
+    const page = await openPage(browser, {
+      page: 'shorts',
+      withMain: { autoCollapse: true },
+      errors,
+    });
+    const gap = await page.evaluate(async () => {
+      const anchor = document.querySelector('volume-controls');
+      // Возвращаем узел в поток, оставив его пустым, — ровно как в бою.
+      anchor.style.display = 'flex';
+      anchor.style.width = '0px';
+      for (const child of anchor.querySelectorAll('*')) child.style.display = 'none';
+      window.dispatchEvent(new Event('resize'));
+      await new Promise((done) => setTimeout(done, 250));
+      const play = document.querySelector('#play-pause-button-shape');
+      const box = document.querySelector('.ytev-box');
+      return {
+        value: +(box.getBoundingClientRect().left - play.getBoundingClientRect().right).toFixed(1),
+        anchorInFlow: anchor.getClientRects().length > 0,
+        ours: getComputedStyle(box).marginLeft,
+      };
+    });
+    await page.close();
+    check(
+      'якорь в потоке: лишний gap гасится отрицательным полем',
+      Math.abs(gap.value - EXPECTED) <= 1,
+      `${gap.value}px, якорь ${gap.anchorInFlow ? 'в потоке' : 'вне потока'}, мы ${gap.ours}`
+    );
+  }
 });
