@@ -11,18 +11,28 @@
     "message": "Экспоненциальная регулировка громкости в YouTube и удлинённый точный ползунок вместо стандартного.",
     "description": "Описание расширения в манифесте и в магазине"
   },
-
-  "enabledTitle": { "message": "Экспоненциальная громкость" },
-  "enabledDescription": { "message": "Точная регулировка на низкой громкости" },
-
-  "curveTitle": { "message": "Точность тихого звука" },
+  "enabledTitle": {
+    "message": "Экспоненциальная громкость"
+  },
+  "enabledDescription": {
+    "message": "Точная регулировка на низкой громкости"
+  },
+  "curveTitle": {
+    "message": "Точность тихого звука"
+  },
   "curveLabel": {
     "message": "Точность регулировки тихого звука",
     "description": "Подпись ползунка для программ чтения с экрана"
   },
-  "curveRangeLow": { "message": "Как в YouTube" },
-  "curveRangeMid": { "message": "Оптимально: 3" },
-  "curveRangeHigh": { "message": "Больше точности" },
+  "curveRangeLow": {
+    "message": "Как в YouTube"
+  },
+  "curveRangeMid": {
+    "message": "Оптимально: 3"
+  },
+  "curveRangeHigh": {
+    "message": "Больше точности"
+  },
   "curveExample": {
     "message": "При положении 50% звук будет ≈ $PERCENT$% от максимума.",
     "placeholders": {
@@ -32,25 +42,51 @@
       }
     }
   },
-
-  "sizeTitle": { "message": "Размер ползунка" },
-  "sizeDescription": { "message": "Отдельно для обычных видео и Shorts." },
-  "sizeVideo": { "message": "Обычное видео" },
-  "sizeShorts": { "message": "Shorts" },
-
-  "behaviorTitle": { "message": "Поведение" },
-  "showPercentTitle": { "message": "Показывать проценты" },
-  "showPercentDescription": { "message": "Точное значение рядом со шкалой" },
-  "autoCollapseTitle": { "message": "Сворачивать автоматически" },
-  "autoCollapseDescription": { "message": "Компактный вид без курсора" },
-  "useNativeTitle": { "message": "Использовать шкалу YouTube" },
-  "useNativeDescription": { "message": "Скрыть ползунок расширения" },
-
-  "saveSaved": { "message": "Сохранено" },
-  "saveSaving": { "message": "Сохраняю…" },
-  "saveError": { "message": "Не удалось сохранить" },
-  "resetButton": { "message": "Сбросить" },
-
+  "sizeTitle": {
+    "message": "Размер ползунка"
+  },
+  "sizeDescription": {
+    "message": "Отдельно для обычных видео и Shorts."
+  },
+  "sizeVideo": {
+    "message": "Обычное видео"
+  },
+  "sizeShorts": {
+    "message": "Shorts"
+  },
+  "behaviorTitle": {
+    "message": "Поведение"
+  },
+  "showPercentTitle": {
+    "message": "Показывать проценты"
+  },
+  "showPercentDescription": {
+    "message": "Точное значение рядом со шкалой"
+  },
+  "autoCollapseTitle": {
+    "message": "Сворачивать автоматически"
+  },
+  "autoCollapseDescription": {
+    "message": "Компактный вид без курсора"
+  },
+  "useNativeTitle": {
+    "message": "Использовать шкалу YouTube"
+  },
+  "useNativeDescription": {
+    "message": "Скрыть ползунок расширения"
+  },
+  "saveSaved": {
+    "message": "Сохранено"
+  },
+  "saveSaving": {
+    "message": "Сохраняю…"
+  },
+  "saveError": {
+    "message": "Не удалось сохранить"
+  },
+  "resetButton": {
+    "message": "Сбросить"
+  },
   "playerSliderLabel": {
     "message": "Громкость",
     "description": "Подпись ползунка расширения в плеере"
@@ -62,18 +98,5 @@
   "playerMute": {
     "message": "Отключить звук (m)",
     "description": "Подсказка кнопки, когда звук включён"
-  },
-  "playerTooltip": {
-    "message": "Громкость: $VALUE$",
-    "placeholders": {
-      "value": { "content": "$1", "example": "42%" }
-    }
-  },
-  "playerTooltipWithOutput": {
-    "message": "Громкость: $VALUE$ (на выходе ≈ $OUTPUT$)",
-    "placeholders": {
-      "value": { "content": "$1", "example": "42%" },
-      "output": { "content": "$2", "example": "7.4%" }
-    }
   }
 }

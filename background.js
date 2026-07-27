@@ -53,14 +53,10 @@ function updateYouTubeVolumeMain(secret, payload) {
 
 // main.js работает в MAIN-мире страницы, где chrome.i18n недоступен, поэтому
 // подписи собираются здесь и уезжают готовыми в том же payload, что настройки.
-// Шаблоны с подстановкой отдаём как есть: значения в них подставляет уже
-// main.js, когда знает проценты.
 const STRING_KEYS = [
   'playerSliderLabel',
   'playerUnmute',
   'playerMute',
-  'playerTooltip',
-  'playerTooltipWithOutput',
 ];
 
 function uiStrings() {

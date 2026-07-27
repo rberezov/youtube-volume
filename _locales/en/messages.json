@@ -11,18 +11,28 @@
     "message": "Exponential volume control for YouTube and a longer, more precise slider in place of the stock one.",
     "description": "Extension description for the manifest and the store"
   },
-
-  "enabledTitle": { "message": "Exponential volume" },
-  "enabledDescription": { "message": "Fine control at low volume" },
-
-  "curveTitle": { "message": "Low-volume precision" },
+  "enabledTitle": {
+    "message": "Exponential volume"
+  },
+  "enabledDescription": {
+    "message": "Fine control at low volume"
+  },
+  "curveTitle": {
+    "message": "Low-volume precision"
+  },
   "curveLabel": {
     "message": "Low-volume control precision",
     "description": "Slider label for screen readers"
   },
-  "curveRangeLow": { "message": "Same as YouTube" },
-  "curveRangeMid": { "message": "Recommended: 3" },
-  "curveRangeHigh": { "message": "More precision" },
+  "curveRangeLow": {
+    "message": "Same as YouTube"
+  },
+  "curveRangeMid": {
+    "message": "Recommended: 3"
+  },
+  "curveRangeHigh": {
+    "message": "More precision"
+  },
   "curveExample": {
     "message": "At the 50% position the sound will be ≈ $PERCENT$% of maximum.",
     "placeholders": {
@@ -32,25 +42,51 @@
       }
     }
   },
-
-  "sizeTitle": { "message": "Slider size" },
-  "sizeDescription": { "message": "Set separately for regular videos and Shorts." },
-  "sizeVideo": { "message": "Regular video" },
-  "sizeShorts": { "message": "Shorts" },
-
-  "behaviorTitle": { "message": "Behaviour" },
-  "showPercentTitle": { "message": "Show percentage" },
-  "showPercentDescription": { "message": "Exact value next to the slider" },
-  "autoCollapseTitle": { "message": "Collapse automatically" },
-  "autoCollapseDescription": { "message": "Compact view when the pointer is away" },
-  "useNativeTitle": { "message": "Use the YouTube slider" },
-  "useNativeDescription": { "message": "Hide the extension slider" },
-
-  "saveSaved": { "message": "Saved" },
-  "saveSaving": { "message": "Saving…" },
-  "saveError": { "message": "Could not save" },
-  "resetButton": { "message": "Reset" },
-
+  "sizeTitle": {
+    "message": "Slider size"
+  },
+  "sizeDescription": {
+    "message": "Set separately for regular videos and Shorts."
+  },
+  "sizeVideo": {
+    "message": "Regular video"
+  },
+  "sizeShorts": {
+    "message": "Shorts"
+  },
+  "behaviorTitle": {
+    "message": "Behaviour"
+  },
+  "showPercentTitle": {
+    "message": "Show percentage"
+  },
+  "showPercentDescription": {
+    "message": "Exact value next to the slider"
+  },
+  "autoCollapseTitle": {
+    "message": "Collapse automatically"
+  },
+  "autoCollapseDescription": {
+    "message": "Compact view when the pointer is away"
+  },
+  "useNativeTitle": {
+    "message": "Use the YouTube slider"
+  },
+  "useNativeDescription": {
+    "message": "Hide the extension slider"
+  },
+  "saveSaved": {
+    "message": "Saved"
+  },
+  "saveSaving": {
+    "message": "Saving…"
+  },
+  "saveError": {
+    "message": "Could not save"
+  },
+  "resetButton": {
+    "message": "Reset"
+  },
   "playerSliderLabel": {
     "message": "Volume",
     "description": "Label of the extension slider in the player"
@@ -62,18 +98,5 @@
   "playerMute": {
     "message": "Mute (m)",
     "description": "Button tooltip while the sound is on"
-  },
-  "playerTooltip": {
-    "message": "Volume: $VALUE$",
-    "placeholders": {
-      "value": { "content": "$1", "example": "42%" }
-    }
-  },
-  "playerTooltipWithOutput": {
-    "message": "Volume: $VALUE$ (output ≈ $OUTPUT$)",
-    "placeholders": {
-      "value": { "content": "$1", "example": "42%" },
-      "output": { "content": "$2", "example": "7.4%" }
-    }
   }
 }

@@ -114,8 +114,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     playerSliderLabel: 'Громкость',
     playerUnmute: 'Включить звук (m)',
     playerMute: 'Отключить звук (m)',
-    playerTooltip: 'Громкость: $VALUE$',
-    playerTooltipWithOutput: 'Громкость: $VALUE$ (на выходе ≈ $OUTPUT$)',
   };
 
   function applyStrings(value) {
@@ -124,13 +122,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       if (typeof value[key] === 'string' && value[key]) STRINGS[key] = value[key];
     }
   }
-
-  // Подстановка как в chrome.i18n: $VALUE$ и $OUTPUT$ в шаблоне из локали.
-  const format = (template, values) =>
-    String(template).replace(/\$([A-Z]+)\$/g, (whole, name) => {
-      const key = name.toLowerCase();
-      return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : whole;
-    });
 
   function applySettings(value) {
     if (!value || typeof value !== 'object') return;
@@ -1267,10 +1258,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       ui.muteBtn.title = title;
       ui.muteBtn.setAttribute('aria-label', title);
     }
-    const real = toReal(pct / 100) * 100;
-    ui.slider.title = SETTINGS.enabled
-      ? format(STRINGS.playerTooltipWithOutput, { value: fmt(pct), output: fmt(real) })
-      : format(STRINGS.playerTooltip, { value: fmt(pct) });
   }
 
   /* ------------------------------------------------------------------ *
