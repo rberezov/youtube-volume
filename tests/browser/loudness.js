@@ -4,11 +4,12 @@
 // насколько ролик громче своей цели. Громкие он глушит сам, тихие оставляет
 // как есть, и расширение добирает недостающее усилителем Web Audio.
 //
-// Решение принимается только по согласованному снимку: уровень из ответа
-// плеера и тип дорожки из статистики должны описывать один и тот же ролик.
-// Поэтому макет плеера здесь полнее, чем «один loudnessDb»: у него есть
-// videoDetails, streamingData.adaptiveFormats и правдоподобная строка
-// громкости — ровно те три места, откуда расширение и читает.
+// Выбранную дорожку знает сам плеер: getDrcState() возвращает 0 при активном
+// DRC и 1 без него. Из streamingData её вычислить нельзя — там лежат все
+// доступные варианты (на ролике с DRC под itag 251 их сразу три), а не
+// текущий выбор. Поэтому макет плеера здесь полнее, чем «один loudnessDb»:
+// у него есть getDrcState, videoDetails, три варианта формата и
+// правдоподобная строка громкости.
 //
 // Наблюдать компенсацию снаружи можно только по фактическому усилению в
 // графе, поэтому тест подменяет AudioContext и записывает всё, что уходит в
@@ -75,30 +76,50 @@ function recordGains() {
 }
 
 // Макет плеера в той форме, в какой данные приходят от настоящего YouTube.
-// spec: { id, db, offersDrc, drcNow, drcWhen, statsDb, statsSilent, responseId }
-// drcWhen — выражение строкой: спек уезжает в страницу как JSON, функции в
-// нём не переживают сериализацию.
+// spec: { id, db, offersDrc, drcState, drcStateWhen, drcNow, drcWhen,
+//         statsDb, statsSilent, responseId, noDrcState }
+// drcStateWhen/drcWhen — выражения строкой: спек уезжает в страницу как JSON,
+// функции в нём не переживают сериализацию.
 function installPlayer(spec, tone) {
   window.__started = Date.now();
   const player = document.getElementById('movie_player');
-  const drcWhen = spec.drcWhen ? new Function('return (' + spec.drcWhen + ')') : null;
-  const audio = (itag, drc) => ({
-    itag,
-    mimeType: 'audio/webm; codecs="opus"',
-    bitrate: 130000,
-    audioQuality: 'AUDIO_QUALITY_MEDIUM',
-    audioTrack: drc ? { id: 'en.4', displayName: 'English original' } : undefined,
-    isDrc: drc ? true : undefined,
-    url: 'https://rr3---sn-x.googlevideo.com/videoplayback?expire=1&sig=' + 'A'.repeat(200),
-  });
-  const formats = [audio(251, false)];
-  if (spec.offersDrc) formats.push(audio('251-drc', true));
+  const expr = (code) => (code ? new Function('return (' + code + ')') : null);
+  const drcWhen = expr(spec.drcWhen);
+  const drcStateWhen = expr(spec.drcStateWhen);
+  // Как в полевом дампе Cmp99FbMSqY: три варианта под одним itag 251,
+  // audioTrack: null у всех, признака «выбран» нет ни у одного.
+  const variant = (extra) =>
+    Object.assign(
+      {
+        itag: 251,
+        mimeType: 'audio/webm; codecs="opus"',
+        bitrate: 130000,
+        audioQuality: 'AUDIO_QUALITY_MEDIUM',
+        audioTrack: null,
+      },
+      extra
+    );
+  const formats = [variant({ loudnessDb: spec.db })];
+  if (spec.offersDrc) {
+    formats.push(variant({ isDrc: true, loudnessDb: 0 }));
+    formats.push(variant({ isVb: true, loudnessDb: -4.24 }));
+  }
   player.getVideoData = () => ({ video_id: spec.id });
   player.getPlayerResponse = () => ({
     videoDetails: { videoId: spec.responseId || spec.id },
-    playerConfig: { audioConfig: { loudnessDb: spec.db } },
+    playerConfig: {
+      audioConfig: { loudnessDb: spec.db, enablePerFormatLoudness: true },
+    },
     streamingData: { adaptiveFormats: formats },
   });
+  // 0 — играет DRC, 1 — исходная дорожка. Любое другое значение расширение
+  // обязано считать неизвестным.
+  if (!spec.noDrcState) {
+    player.getDrcState = () => {
+      if (drcStateWhen) return drcStateWhen() ? 0 : 1;
+      return spec.drcState != null ? spec.drcState : spec.offersDrc && spec.drcNow ? 0 : 1;
+    };
+  }
   player.getStatsForNerds = () => {
     if (spec.drcNow === true || (drcWhen && drcWhen())) {
       return { volume: 'DRC (cont.-14.0 dB / tgt.-14.0 dB)' };
@@ -219,33 +240,73 @@ run('loudness: компенсация тихих роликов', async ({ brows
     JSON.stringify(drcQuiet.report)
   );
 
-  // Второй путь к решению: статистика молчит, но в ответе плеера нет ни одной
-  // DRC-дорожки — играть ей неоткуда, и ждать нечего.
-  const byFormats = await measure({ id: 'formats', db: -6, statsSilent: true });
+  // Статистика ещё молчит, но плеер уже знает выбранную дорожку — ждать
+  // нечего. Это и есть выигрыш перед прежним разбором строки громкости.
+  const byState = await measure({ id: 'state', db: -6, statsSilent: true });
   check(
-    'без DRC-дорожки в ответе решение принимается без статистики',
-    byFormats.last !== null && Math.abs(byFormats.last - BASE_GAIN * boostOf(6)) < 1e-6,
-    `${byFormats.last} при источнике «${byFormats.report && byFormats.report.source}»`
+    'решение принимается по состоянию плеера, без статистики',
+    byState.last !== null &&
+      Math.abs(byState.last - BASE_GAIN * boostOf(6)) < 1e-6 &&
+      byState.report.source === 'drcState',
+    `${byState.last} при источнике «${byState.report && byState.report.source}»`
   );
 
-  // Главная проверка: DRC-дорожка предлагается, а статистика ещё не про этот
-  // ролик (показывает чужой уровень). Снимок не согласован — усиления нет
-  // ни на миг, и это не зависит ни от какого времени.
-  const ambiguous = await measure({
-    id: 'ambiguous',
+  // Наличие DRC-варианта в streamingData — это доступность, а не выбор: под
+  // одним itag лежат сразу три варианта. Решать по нему нельзя.
+  const offered = await measure({
+    id: 'offered',
     db: -6,
     offersDrc: true,
+    drcState: 1,
     statsSilent: true,
   });
   check(
-    'несогласованный снимок: усиление не поднимается',
-    ambiguous.gains.length > 0 && Math.max(...ambiguous.gains) <= BASE_GAIN + 1e-6,
-    `максимум в графе ${Math.max(...ambiguous.gains)} при базовом ${BASE_GAIN}`
+    'наличие DRC-варианта в ответе само по себе усиление не отменяет',
+    offered.last !== null && Math.abs(offered.last - BASE_GAIN * boostOf(6)) < 1e-6,
+    `${offered.last} против ожидаемого ${BASE_GAIN * boostOf(6)}`
+  );
+
+  // getDrcState() — внутренний API. Неизвестное значение считаем «неизвестно»,
+  // и усиление тогда не поднимается.
+  const strange = await measure({
+    id: 'strange',
+    db: -6,
+    offersDrc: true,
+    drcState: 2,
+    statsSilent: true,
+  });
+  check(
+    'неизвестное значение getDrcState: усиление не поднимается',
+    strange.gains.length > 0 && Math.max(...strange.gains) <= BASE_GAIN + 1e-6,
+    `максимум в графе ${Math.max(...strange.gains)} при базовом ${BASE_GAIN}`
   );
   check(
-    'несогласованный снимок: диагностика честно говорит «неизвестно»',
-    ambiguous.report && ambiguous.report.complete === false,
-    JSON.stringify(ambiguous.report)
+    'неизвестное значение getDrcState: диагностика говорит «неизвестно»',
+    strange.report && strange.report.complete === false,
+    JSON.stringify(strange.report)
+  );
+
+  // Если внутренний метод однажды исчезнет, остаётся запасной путь: решение
+  // по статистике, но только когда её уровень совпал с ответом плеера.
+  const fallback = await measure({ id: 'fallback', db: -6, noDrcState: true });
+  check(
+    'без getDrcState решение берётся из подтверждённой статистики',
+    fallback.last !== null &&
+      Math.abs(fallback.last - BASE_GAIN * boostOf(6)) < 1e-6 &&
+      fallback.report.source === 'stats',
+    `${fallback.last} при источнике «${fallback.report && fallback.report.source}»`
+  );
+
+  const unconfirmed = await measure({
+    id: 'unconfirmed',
+    db: -6,
+    noDrcState: true,
+    statsSilent: true,
+  });
+  check(
+    'без getDrcState и без подтверждения усиление не поднимается',
+    unconfirmed.gains.length > 0 && Math.max(...unconfirmed.gains) <= BASE_GAIN + 1e-6,
+    `максимум в графе ${Math.max(...unconfirmed.gains)} при базовом ${BASE_GAIN}`
   );
 
   // Ответ плеера от предыдущего ролика (так бывает сразу после перехода)
@@ -268,6 +329,7 @@ run('loudness: компенсация тихих роликов', async ({ brows
       id: 'toggle',
       db: -6,
       offersDrc: true,
+      drcStateWhen: 'window.__drc === true',
       drcWhen: 'window.__drc === true',
     });
     await page.waitForTimeout(1200);
@@ -283,16 +345,18 @@ run('loudness: компенсация тихих роликов', async ({ brows
     );
   }
 
-  // Страховка от прежней гонки: при переходе Shorts → обычное видео
-  // loudnessDb приходил раньше признака DRC, и расширение успевало включить
-  // усиление на ~0.9с. Теперь признак может опоздать на сколько угодно —
-  // до него снимок несогласован, и усиления не бывает вовсе.
+  // Точная реконструкция пойманной гонки: при переходе Shorts → обычное видео
+  // loudnessDb приходил раньше признака DRC в статистике, и расширение
+  // успевало включить усиление на ~0.9с. В том же замере getDrcState() уже
+  // отдавал 0 — значит опаздывала именно статистика, а не сам выбор дорожки.
+  // Теперь она может опаздывать на сколько угодно.
   {
     const page = await play({
       id: 'race',
       db: -1.57,
       offersDrc: true,
       statsSilent: true,
+      drcState: 0,
       drcWhen: 'Date.now() - window.__started > 600',
     });
     await page.waitForTimeout(2200);
@@ -300,13 +364,13 @@ run('loudness: компенсация тихих роликов', async ({ brows
     await page.close();
     const loudest = gains.length ? Math.max(...gains) : 0;
     check(
-      'поздний признак DRC: усиление не включалось ни на миг',
+      'поздняя статистика: усиление не включалось ни на миг',
       loudest <= BASE_GAIN + 1e-6,
       `максимум в графе ${loudest} при базовом ${BASE_GAIN}`
     );
     check(
-      'поздний признак DRC: итог — без усиления',
-      report.drc === true && report.boostDb === 0,
+      'поздняя статистика: решение сразу взято у плеера',
+      report.drc === true && report.boostDb === 0 && report.source === 'drcState',
       JSON.stringify(report)
     );
   }

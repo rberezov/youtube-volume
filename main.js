@@ -626,36 +626,38 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   let loudnessBoost = 1;
   let loudnessKey = '';
 
-  /* ---- Почему решение принимается только по согласованному снимку ----
+  /* ---- Почему решение спрашивается у плеера, а не собирается по кусочкам --
    *
-   * Новый YouTube умеет отдавать отдельную DRC-дорожку («стабильная
-   * громкость»): она уже сведена к цели −14 LKFS, а
-   * playerConfig.audioConfig.loudnessDb остаётся от исходной дорожки. Усиление
-   * по нему поверх DRC — двойная нормализация: на ролике с
+   * Новый YouTube умеет отдавать DRC-вариант дорожки («стабильная
+   * громкость»): он уже сведён к цели −14 LKFS и его собственный loudnessDb
+   * равен нулю, а playerConfig.audioConfig.loudnessDb остаётся от исходной
+   * дорожки. Усиление по нему поверх DRC — двойная нормализация: на ролике с
    * «DRC (cont.−14.0 dB / tgt.−14.0 dB)» расширение читало −12.7дБ и
    * накидывало ещё +6дБ.
    *
-   * Уровень и тип дорожки лежат в разных местах — в ответе плеера и в
-   * статистике — и готовы не одновременно. Замер на переходе Shorts → обычное
-   * видео: усиление на 553мс, признак DRC на 616мс, снятие только на 1513мс.
-   * Раньше это лечилось окном ожидания в 2 секунды, но окно — догадка о
-   * величине зазора: на медленной машине или медленном канале зазор её
-   * превысит, на быстрой мы ждём зря.
+   * Раньше тип дорожки брался из строки громкости в getStatsForNerds(), и это
+   * порождало гонку: замер на переходе Shorts → обычное видео показал усиление
+   * на 553мс, признак DRC на 616мс и снятие только на 1513мс. Лечить её окном
+   * ожидания нельзя — окно лишь догадка о величине зазора: на медленной машине
+   * или медленном канале зазор её превысит, на быстрой мы ждём зря.
    *
-   * Поэтому ждём не время, а факт. Решение считается известным, только если
-   * два источника описывают одну и ту же дорожку:
-   *   - в строке громкости стоит DRC — усиливать нечего, вопрос закрыт;
-   *   - либо статистика показывает ровно тот же уровень, что и ответ плеера
-   *     (в «Статистике для сисадминов» он подписан как content loudness), —
-   *     значит статистика уже про этот ролик, и DRC в ней нет;
-   *   - либо ответ плеера вовсе не предлагает DRC-дорожки — тогда играть ей
-   *     неоткуда.
-   * Во всех остальных случаях снимок неполон, и усиление не поднимается.
+   * Полевой дамп ответа плеера показал, что вычислить дорожку из самого ответа
+   * тоже нельзя. На ролике с DRC под одним и тем же itag 251 лежат сразу три
+   * варианта — исходный (loudnessDb −12.71), DRC (isDrc: true, loudnessDb 0) и
+   * ещё один с −4.24; audioTrack у всех null, признака selected/active нет, а
+   * в SABR-режиме у форматов нет даже url. То есть streamingData описывает
+   * доступные варианты, а не текущий выбор: наличие isDrc: true не значит, что
+   * DRC играет. По той же причине не годится и hasDrcAudioTrack() — это
+   * доступность, и в момент гонки она запаздывала.
+   *
+   * Выбранную дорожку знает сам плеер: getDrcState() возвращает 0 при активном
+   * DRC и 1 без него, и в пойманной гонке он уже отдавал 0, когда статистика
+   * ещё молчала. Спрашиваем состояние у него — источник задержки исчезает
+   * вместе с окном. Метод внутренний, поэтому любое иное значение (и его
+   * отсутствие) считаем «неизвестно», а в этом состоянии усиление не
+   * поднимается никогда.
    * ------------------------------------------------------------------ */
 
-  // Ключи формата со ссылками и подписями: там встречается любое сочетание
-  // букв, и поиск «drc» по ним давал бы ложные срабатывания.
-  const FORMAT_NOISE_KEY = /url|cipher|signature|init|index|range|projection/i;
   // Число перед «dB» в строке громкости. Минус бывает и типографский, а
   // разделитель дробной части зависит от локали интерфейса.
   const DB_IN_STATS = /(-|−)?(\d+(?:[.,]\d+)?)\s*dB/gi;
@@ -670,8 +672,24 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     }
   }
 
-  // Совпал ли уровень из статистики с уровнем из ответа плеера. Это и есть
-  // сверка: два источника сошлись — значит описывают один ролик.
+  // Играет ли сейчас DRC-вариант. null — плеер не ответил или ответил
+  // значением, которого мы не знаем.
+  function readDrcState(player) {
+    if (!player || typeof player.getDrcState !== 'function') return null;
+    try {
+      const value = player.getDrcState();
+      if (value === 0) return true;
+      if (value === 1) return false;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Запасной путь на случай, если внутренний getDrcState() однажды исчезнет:
+  // решаем по статистике, но только когда её уровень совпал с уровнем из
+  // ответа плеера. Совпадение и есть доказательство, что оба источника
+  // описывают один ролик, — без него никакого решения.
   function statsConfirms(text, db) {
     DB_IN_STATS.lastIndex = 0;
     for (let match; (match = DB_IN_STATS.exec(text)); ) {
@@ -680,38 +698,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       if (Number.isFinite(value) && Math.abs(value - db) < 0.1) return true;
     }
     return false;
-  }
-
-  // DRC-дорожка у YouTube — отдельный формат (в yt-dlp он виден как «251-drc»
-  // рядом с «251»), поэтому метка есть в самом описании формата. Ищем её
-  // широко, не завязываясь на единственное имя поля: правка должна пережить
-  // переименование.
-  function formatLooksDrc(format) {
-    if (!format || typeof format !== 'object') return false;
-    for (const key of Object.keys(format)) {
-      if (FORMAT_NOISE_KEY.test(key)) continue;
-      const value = format[key];
-      if (value == null || value === false || value === '') continue;
-      if (/drc/i.test(key)) return true;
-      let text;
-      try {
-        text = typeof value === 'object' ? JSON.stringify(value) : String(value);
-      } catch {
-        continue;
-      }
-      // Длинные строки — это всё те же ссылки под другими именами: короткое
-      // «drc» находится в них случайно.
-      if (text.length <= 120 && /drc/i.test(text)) return true;
-    }
-    return false;
-  }
-
-  function audioFormats(response) {
-    const streaming = response && response.streamingData;
-    const list = streaming && streaming.adaptiveFormats;
-    if (!Array.isArray(list)) return null;
-    const audio = list.filter((f) => f && /^audio/i.test(String(f.mimeType || '')));
-    return audio.length ? audio : null;
   }
 
   function currentVideoId(player) {
@@ -725,7 +711,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   }
 
   /**
-   * Полное решение из одного снимка.
+   * Полное решение из одного снимка состояния плеера.
    * `complete: false` — «пока неизвестно»; в этом состоянии усиление не
    * поднимается никогда, поэтому худший исход на медленной машине — «тише,
    * чем могло бы», и никогда «громче, чем нужно».
@@ -759,16 +745,17 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // диагностика не отличит «уровня ещё нет» от «нечем подтвердить».
     unknown.db = known.db;
 
+    const drc = readDrcState(player);
+    // При активном DRC уровень уже не нужен: усиливать нечего в любом случае.
+    if (drc === true) return { ...known, drc: true, complete: true, source: 'drcState' };
+    if (!Number.isFinite(db)) return unknown;
+    if (drc === false) return { ...known, drc: false, complete: true, source: 'drcState' };
+
     if (/\bDRC\b/.test(stats)) {
       return { ...known, drc: true, complete: true, source: 'stats' };
     }
-    if (!Number.isFinite(db)) return unknown;
     if (statsConfirms(stats, db)) {
       return { ...known, drc: false, complete: true, source: 'stats' };
-    }
-    const formats = audioFormats(response);
-    if (formats && !formats.some(formatLooksDrc)) {
-      return { ...known, drc: false, complete: true, source: 'formats' };
     }
     return unknown;
   }
