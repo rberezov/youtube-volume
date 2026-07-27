@@ -76,16 +76,18 @@ function recordGains() {
 }
 
 // Макет плеера в той форме, в какой данные приходят от настоящего YouTube.
-// spec: { id, db, offersDrc, drcState, drcStateWhen, drcNow, drcWhen,
-//         statsDb, statsSilent, responseId, noDrcState }
-// drcStateWhen/drcWhen — выражения строкой: спек уезжает в страницу как JSON,
-// функции в нём не переживают сериализацию.
+// spec: { id, db, offersDrc, drcState, drcStateWhen, preference, preferenceWhen,
+//         noPreference, drcNow, drcWhen, statsDb, statsSilent, responseId,
+//         noDrcState }
+// *When — выражения строкой: спек уезжает в страницу как JSON, функции в нём
+// не переживают сериализацию.
 function installPlayer(spec, tone) {
   window.__started = Date.now();
   const player = document.getElementById('movie_player');
   const expr = (code) => (code ? new Function('return (' + code + ')') : null);
   const drcWhen = expr(spec.drcWhen);
   const drcStateWhen = expr(spec.drcStateWhen);
+  const preferenceWhen = expr(spec.preferenceWhen);
   // Как в полевом дампе Cmp99FbMSqY: три варианта под одним itag 251,
   // audioTrack: null у всех, признака «выбран» нет ни у одного.
   const variant = (extra) =>
@@ -120,15 +122,33 @@ function installPlayer(spec, tone) {
       return spec.drcState != null ? spec.drcState : spec.offersDrc && spec.drcNow ? 0 : 1;
     };
   }
+  // Предпочтение «стабильной громкости»: 1 — включена, 0 — выключена. Именно
+  // оно меняется при ручном переключении, тогда как getDrcState() залипает.
+  if (!spec.noPreference) {
+    player.getDrcUserPreference = () => {
+      if (preferenceWhen) return preferenceWhen() ? 1 : 0;
+      return spec.preference != null ? spec.preference : 1;
+    };
+  }
   player.getStatsForNerds = () => {
     if (spec.drcNow === true || (drcWhen && drcWhen())) {
-      return { volume: 'DRC (cont.-14.0 dB / tgt.-14.0 dB)' };
+      return { volume: '100% / 100% (DRC (cont.-14.0 dB / tgt.-14.0 dB))' };
     }
     // statsSilent — статистика ещё не отдала уровень (или отдала чужой):
     // сверять не с чем, и снимок считается неполным.
     if (spec.statsSilent) return { volume: '100% / 100%' };
     const shown = spec.statsDb != null ? spec.statsDb : spec.db;
-    return { volume: `100% / 100% (content loudness ${shown.toFixed(1)}dB)` };
+    // Старая форма печатала сам loudnessDb, нынешняя — абсолютный уровень и
+    // цель нормализации, а loudnessDb в ней это их разность.
+    if (spec.statsLegacy) {
+      return { volume: `100% / 100% (content loudness ${shown.toFixed(1)}dB)` };
+    }
+    const target = -14;
+    return {
+      volume: `100% / 100% (cont.${(target + shown).toFixed(1)} dB / tgt.${target.toFixed(
+        1
+      )} dB)`,
+    };
   };
   const video = document.querySelector('video');
   video.src = tone;
@@ -280,27 +300,64 @@ run('loudness: компенсация тихих роликов', async ({ brows
     strange.gains.length > 0 && Math.max(...strange.gains) <= BASE_GAIN + 1e-6,
     `максимум в графе ${Math.max(...strange.gains)} при базовом ${BASE_GAIN}`
   );
+  // Без предпочтения решить, играет ли DRC, нельзя: одного залипающего
+  // состояния мало.
+  const noPref = await measure({
+    id: 'nopref',
+    db: -6,
+    offersDrc: true,
+    drcState: 0,
+    noPreference: true,
+    statsSilent: true,
+  });
+  check(
+    'состояние 0 без getDrcUserPreference: усиление не поднимается',
+    noPref.gains.length > 0 && Math.max(...noPref.gains) <= BASE_GAIN + 1e-6,
+    `максимум в графе ${Math.max(...noPref.gains)} при базовом ${BASE_GAIN}`
+  );
   check(
     'неизвестное значение getDrcState: диагностика говорит «неизвестно»',
     strange.report && strange.report.complete === false,
     JSON.stringify(strange.report)
   );
 
-  // Если внутренний метод однажды исчезнет, остаётся запасной путь: решение
+  // Если внутренние методы однажды исчезнут, остаётся запасной путь: решение
   // по статистике, но только когда её уровень совпал с ответом плеера.
-  const fallback = await measure({ id: 'fallback', db: -6, noDrcState: true });
+  // Нынешняя форма строки печатает абсолютный уровень и цель, loudnessDb в
+  // ней — их разность.
+  const fallback = await measure({
+    id: 'fallback',
+    db: -6,
+    noDrcState: true,
+    noPreference: true,
+  });
   check(
-    'без getDrcState решение берётся из подтверждённой статистики',
+    'без методов плеера решение берётся из подтверждённой статистики',
     fallback.last !== null &&
       Math.abs(fallback.last - BASE_GAIN * boostOf(6)) < 1e-6 &&
       fallback.report.source === 'stats',
     `${fallback.last} при источнике «${fallback.report && fallback.report.source}»`
   );
 
+  const legacyStats = await measure({
+    id: 'legacy',
+    db: -6,
+    noDrcState: true,
+    noPreference: true,
+    statsLegacy: true,
+  });
+  check(
+    'старая форма строки громкости тоже подтверждает уровень',
+    legacyStats.last !== null &&
+      Math.abs(legacyStats.last - BASE_GAIN * boostOf(6)) < 1e-6,
+    `${legacyStats.last} против ожидаемого ${BASE_GAIN * boostOf(6)}`
+  );
+
   const unconfirmed = await measure({
     id: 'unconfirmed',
     db: -6,
     noDrcState: true,
+    noPreference: true,
     statsSilent: true,
   });
   check(
@@ -322,26 +379,64 @@ run('loudness: компенсация тихих роликов', async ({ brows
     `${stale.last} против ожидаемого ${BASE_GAIN}`
   );
 
-  // «Стабильную громкость» можно включить прямо во время ролика: решение
-  // должно пересчитаться, а не залипнуть на прежнем усилении.
+  // Полевой регресс 1.18.0: на Cmp99FbMSqY «стабильная громкость» выключается
+  // вручную, статистика переключается на исходную дорожку, а getDrcState()
+  // залипает на 0 — не меняется ни через пять секунд, ни после перезагрузки.
+  // Меняется только getDrcUserPreference() (1 → 0). Расширение продолжало
+  // показывать drc: true и не добирало положенные +6дБ.
+  //
+  // Переключение YouTube сопровождает событиями emptied и durationchange —
+  // проверяем, что решение обновляется по ним, а не по секундному тику:
+  // ждём заведомо меньше секунды.
   {
-    const page = await play({
-      id: 'toggle',
-      db: -6,
-      offersDrc: true,
-      drcStateWhen: 'window.__drc === true',
-      drcWhen: 'window.__drc === true',
-    });
-    await page.waitForTimeout(1200);
-    const before = (await readAll(page)).report.boostDb;
-    await page.evaluate(() => (window.__drc = true));
-    await page.waitForTimeout(1600); // решение обновляет секундный тик
-    const after = (await readAll(page)).report.boostDb;
-    await page.close();
+    const toggle = async (from, to) => {
+      const page = await play({
+        id: 'preference',
+        db: -12.7,
+        offersDrc: true,
+        drcState: 0, // залипает, как в поле
+        preferenceWhen: `window.__pref !== undefined ? window.__pref === 1 : ${from} === 1`,
+        drcWhen: `window.__pref !== undefined ? window.__pref === 1 : ${from} === 1`,
+      });
+      await page.waitForTimeout(1200);
+      const before = (await readAll(page)).report;
+      // Переключаем и читаем решение в одном заходе, без единой паузы: тик
+      // тут физически не успевает, поэтому изменение может прийти только от
+      // самих событий.
+      const after = await page.evaluate((next) => {
+        window.__pref = next;
+        const video = document.querySelector('video');
+        video.dispatchEvent(new Event('emptied'));
+        video.dispatchEvent(new Event('durationchange'));
+        return window[Symbol.for('ytev.main.instance.v2')].loudness();
+      }, to);
+      await page.close();
+      return { before, after };
+    };
+
+    const offNow = await toggle(1, 0);
     check(
-      'включение DRC во время ролика снимает усиление',
-      Math.abs(before - 6) < 0.01 && after === 0,
-      `${before}дБ → ${after}дБ`
+      'выключение «стабильной громкости» возвращает усиление',
+      offNow.before.boostDb === 0 &&
+        offNow.before.drc === true &&
+        Math.abs(offNow.after.boostDb - 6) < 0.01 &&
+        offNow.after.drc === false,
+      `${offNow.before.boostDb}дБ → ${offNow.after.boostDb}дБ, ` +
+        `state=${offNow.after.state} preference=${offNow.after.preference}`
+    );
+    check(
+      'решение обновляется самими emptied/durationchange, без тика',
+      Math.abs(offNow.after.boostDb - 6) < 0.01,
+      'замер снят синхронно с событиями'
+    );
+
+    const onNow = await toggle(0, 1);
+    check(
+      'включение «стабильной громкости» снимает усиление',
+      Math.abs(onNow.before.boostDb - 6) < 0.01 &&
+        onNow.after.boostDb === 0 &&
+        onNow.after.drc === true,
+      `${onNow.before.boostDb}дБ → ${onNow.after.boostDb}дБ`
     );
   }
 

@@ -621,8 +621,17 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
    * ------------------------------------------------------------------ */
 
   const MAX_BOOST_DB = 6;
-  // События дорожки, на которых имеет смысл перечитать снимок.
-  const LOUDNESS_EVENTS = ['loadedmetadata', 'loadeddata', 'canplay', 'playing'];
+  // События дорожки, на которых имеет смысл перечитать снимок. emptied и
+  // durationchange — это ровно то, что YouTube испускает при ручном
+  // переключении «стабильной громкости»: без них решение ждало бы тика.
+  const LOUDNESS_EVENTS = [
+    'emptied',
+    'durationchange',
+    'loadedmetadata',
+    'loadeddata',
+    'canplay',
+    'playing',
+  ];
   let loudnessBoost = 1;
   let loudnessKey = '';
 
@@ -652,10 +661,15 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
    *
    * Выбранную дорожку знает сам плеер: getDrcState() возвращает 0 при активном
    * DRC и 1 без него, и в пойманной гонке он уже отдавал 0, когда статистика
-   * ещё молчала. Спрашиваем состояние у него — источник задержки исчезает
-   * вместе с окном. Метод внутренний, поэтому любое иное значение (и его
-   * отсутствие) считаем «неизвестно», а в этом состоянии усиление не
-   * поднимается никогда.
+   * ещё молчала. Но одного его мало: при ручном выключении «стабильной
+   * громкости» на ролике с DRC он залипает на 0 — статистика уже показывала
+   * исходную дорожку (cont.−26.7дБ), а состояние не менялось ни через пять
+   * секунд, ни после перезагрузки. Меняется там getDrcUserPreference():
+   * 1 — «стабильная громкость» включена, 0 — выключена.
+   * Поэтому DRC считается играющим только при совпадении обоих: состояние 0 и
+   * предпочтение 1. Состояние 1 или предпочтение 0 — значит играет исходная
+   * дорожка. Всё остальное (включая отсутствие любого из методов) —
+   * «неизвестно», а в этом состоянии усиление не поднимается никогда.
    * ------------------------------------------------------------------ */
 
   // Число перед «dB» в строке громкости. Минус бывает и типографский, а
@@ -672,32 +686,42 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     }
   }
 
-  // Играет ли сейчас DRC-вариант. null — плеер не ответил или ответил
-  // значением, которого мы не знаем.
-  function readDrcState(player) {
-    if (!player || typeof player.getDrcState !== 'function') return null;
+  function callPlayer(player, method) {
+    if (!player || typeof player[method] !== 'function') return undefined;
     try {
-      const value = player.getDrcState();
-      if (value === 0) return true;
-      if (value === 1) return false;
-      return null;
+      return player[method]();
     } catch {
-      return null;
+      return undefined;
     }
   }
 
-  // Запасной путь на случай, если внутренний getDrcState() однажды исчезнет:
+  // Играет ли сейчас DRC-вариант. null — «неизвестно»: либо плеер не ответил,
+  // либо его ответы не складываются в решение.
+  function drcFromPlayer(state, preference) {
+    if (state === 0 && preference === 1) return true;
+    if (state === 1 || preference === 0) return false;
+    return null;
+  }
+
+  // Запасной путь на случай, если внутренние методы плеера однажды исчезнут:
   // решаем по статистике, но только когда её уровень совпал с уровнем из
   // ответа плеера. Совпадение и есть доказательство, что оба источника
   // описывают один ролик, — без него никакого решения.
+  //
+  // Форм у строки две. Старая печатала сам loudnessDb («content loudness
+  // −12.7dB»), новая — абсолютный уровень и цель («cont.−26.7 dB / tgt.−14.0
+  // dB»), а loudnessDb в ней это их разность. Принимаем обе: статистика
+  // округляет до десятых, отсюда допуск.
   function statsConfirms(text, db) {
+    const numbers = [];
     DB_IN_STATS.lastIndex = 0;
     for (let match; (match = DB_IN_STATS.exec(text)); ) {
       const value = Number(String(match[2]).replace(',', '.')) * (match[1] ? -1 : 1);
-      // Статистика округляет до десятых, отсюда допуск.
-      if (Number.isFinite(value) && Math.abs(value - db) < 0.1) return true;
+      if (Number.isFinite(value)) numbers.push(value);
     }
-    return false;
+    const close = (value) => Math.abs(value - db) < 0.1;
+    if (numbers.some(close)) return true;
+    return numbers.length >= 2 && close(numbers[0] - numbers[1]);
   }
 
   function currentVideoId(player) {
@@ -719,7 +743,20 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   function readLoudness(player) {
     const id = currentVideoId(player);
     const stats = statsVolumeText(player);
-    const unknown = { id, db: null, drc: false, complete: false, source: '', stats };
+    // Сырые ответы плеера возим в снимке: полевой разбор регресса со
+    // «стабильной громкостью» упирался ровно в то, что их не было видно.
+    const state = callPlayer(player, 'getDrcState');
+    const preference = callPlayer(player, 'getDrcUserPreference');
+    const unknown = {
+      id,
+      db: null,
+      drc: false,
+      complete: false,
+      source: '',
+      stats,
+      state,
+      preference,
+    };
     if (!player || typeof player.getPlayerResponse !== 'function') return unknown;
     let response = null;
     try {
@@ -740,12 +777,18 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const config = response.playerConfig && response.playerConfig.audioConfig;
     const raw = config ? config.loudnessDb : undefined;
     const db = raw == null || raw === '' ? NaN : Number(raw);
-    const known = { id: videoId, db: Number.isFinite(db) ? db : null, stats };
+    const known = {
+      id: videoId,
+      db: Number.isFinite(db) ? db : null,
+      stats,
+      state,
+      preference,
+    };
     // Прочитанный уровень показываем и в неполном снимке: без него
     // диагностика не отличит «уровня ещё нет» от «нечем подтвердить».
     unknown.db = known.db;
 
-    const drc = readDrcState(player);
+    const drc = drcFromPlayer(state, preference);
     // При активном DRC уровень уже не нужен: усиливать нечего в любом случае.
     if (drc === true) return { ...known, drc: true, complete: true, source: 'drcState' };
     if (!Number.isFinite(db)) return unknown;
@@ -1113,12 +1156,15 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         enabled: SETTINGS.normalizeLoudness,
         db: snap.db,
         drc: snap.drc,
-        // complete — согласовались ли источники; source — кто дал ответ.
-        // Вместе со stats этого хватает, чтобы разобрать любой спорный
-        // случай прямо из консоли, не добавляя отладочных крючков.
+        // complete — определилось ли состояние; source — кто дал ответ.
+        // Вместе со stats и сырыми state/preference этого хватает, чтобы
+        // разобрать любой спорный случай прямо из консоли, не добавляя
+        // отладочных крючков.
         complete: snap.complete,
         source: snap.source,
         stats: snap.stats,
+        state: snap.state,
+        preference: snap.preference,
         boost: loudnessBoost,
         boostDb: Number((20 * Math.log10(loudnessBoost)).toFixed(2)),
         maxBoostDb: MAX_BOOST_DB,
