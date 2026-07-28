@@ -72,6 +72,15 @@ async function probe(browser, { cache }) {
     `фактическая=${held.physical}`
   );
 
+  const forged = await probe(browser, {
+    cache: JSON.stringify({ volume: 1, muted: false, enabled: false, gamma: 1 }),
+  });
+  check(
+    'поддельный кэш не поднимает ранний звук выше безопасного потолка',
+    Math.abs(forged.physical - 0.5) < 1e-9,
+    `фактическая=${forged.physical}`
+  );
+
   await browser.close();
   process.exit(reporter.finish() ? 1 : 0);
 })().catch((error) => {

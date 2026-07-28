@@ -88,12 +88,17 @@ function bootScript({ settings, state, channel = CHANNEL, secret = SECRET } = {}
     state: { savedVolume: 0.5, savedMuted: false, ...state },
   };
   return `
+    ${readSource('preload.js')}
     ${readSource('main.js')}
     window.__ok = youtubeVolumeMain(${JSON.stringify(payload)}, ${JSON.stringify(secret)});
     window.__update = (patch) =>
-      window[Symbol.for('ytev.main.instance.v2')].update(${JSON.stringify(secret)}, {
+      window[Symbol.for('ytev.preload.instance.v1')].invokeControl(
+        ${JSON.stringify(secret)},
+        'update',
+        {
         settings: { ...${JSON.stringify(TEST_SETTINGS)}, ...patch },
-      });
+        }
+      );
   `;
 }
 
@@ -173,6 +178,9 @@ async function openPage(browser, options = {}) {
     route.fulfill({ contentType: 'text/html', body: PAGE_HTML[kind] })
   );
   await page.goto(PAGE_URL[kind]);
+  // В расширении неизменяемый MAIN-брокер preload.js всегда появляется на
+  // document_start раньше полной инъекции main.js.
+  await page.addScriptTag({ content: readSource('preload.js') });
   if (before) await before(page);
   if (withBridge) await page.addScriptTag({ content: readSource('bridge.js') });
   if (withMain) {

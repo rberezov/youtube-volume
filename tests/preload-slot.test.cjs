@@ -146,6 +146,29 @@ function scenario({ cache, shortsSliderValue = null }) {
     },
     'the claimed slot must not be replaceable by the page'
   );
+
+  const channel = 'a'.repeat(32);
+  const secret = 'b'.repeat(64);
+  let updates = 0;
+  assert.equal(api.beginControl(channel, secret), true);
+  assert.equal(
+    api.commitControl(secret, {
+      dispose() {},
+      update(payload) {
+        updates += payload.step;
+        return true;
+      },
+      drcRestoreState() {
+        return true;
+      },
+    }),
+    true
+  );
+  assert.equal(api.invokeControl('c'.repeat(64), 'update', { step: 1 }), null);
+  assert.equal(updates, 0, 'a caller without the isolated secret must do nothing');
+  assert.equal(api.invokeControl(secret, 'update', { step: 2 }), true);
+  assert.equal(updates, 2);
+  assert.equal(api.invokeControl(secret, 'drcRestoreState'), true);
 }
 
 // 2. Битый кэш — страница может испортить ytev-volume-state-v1, это обычный
@@ -192,6 +215,32 @@ function scenario({ cache, shortsSliderValue = null }) {
     state.volumeDirty,
     true,
     'a value the native control shows must be trusted for storage'
+  );
+}
+
+// 5. Значения из localStorage принадлежат странице. Даже корректно
+//    сформированный поддельный кэш не должен дать раннему коду полный уровень.
+{
+  const { window, MediaMock, nativeVolume } = scenario({
+    cache: JSON.stringify({
+      volume: 1,
+      muted: false,
+      enabled: false,
+      gamma: 1,
+      useNativeSlider: false,
+    }),
+  });
+  const media = new MediaMock();
+  media.volume = 1;
+  assert.equal(
+    nativeVolume.get.call(media),
+    0.5,
+    'untrusted early cache must be capped at the fail-safe output level'
+  );
+  assert.equal(
+    window[INSTANCE_KEY].takeover().volume,
+    0.5,
+    'the page-provided full-volume value must not enter trusted takeover state'
   );
 }
 

@@ -59,23 +59,28 @@ function targetFrom(sender) {
 }
 
 function updateYouTubeVolumeMain(secret, payload) {
-  const instance = window[Symbol.for('ytev.main.instance.v2')];
-  if (!instance || instance.version !== 2 || typeof instance.update !== 'function') {
+  const broker = window[Symbol.for('ytev.preload.instance.v1')];
+  if (
+    !broker ||
+    broker.version !== 1 ||
+    typeof broker.invokeControl !== 'function'
+  ) {
     return false;
   }
-  return instance.update(secret, payload);
+  return broker.invokeControl(secret, 'update', payload) === true;
 }
 
 function readYouTubeVolumeDrcRestoreState(secret) {
-  const instance = window[Symbol.for('ytev.main.instance.v2')];
+  const broker = window[Symbol.for('ytev.preload.instance.v1')];
   if (
-    !instance ||
-    instance.version !== 2 ||
-    typeof instance.drcRestoreState !== 'function'
+    !broker ||
+    broker.version !== 1 ||
+    typeof broker.invokeControl !== 'function'
   ) {
     return null;
   }
-  return instance.drcRestoreState(secret);
+  const value = broker.invokeControl(secret, 'drcRestoreState');
+  return typeof value === 'boolean' ? value : null;
 }
 
 // main.js работает в MAIN-мире страницы, где chrome.i18n недоступен, поэтому

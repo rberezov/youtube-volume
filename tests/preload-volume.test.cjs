@@ -147,15 +147,10 @@ vm.runInContext(source, context, { filename: 'preload.js' });
 
 assert.equal(
   rootClasses.has('ytev-native-volume-hidden'),
-  true,
-  'cached custom-slider mode must hide native controls at document_start'
+  false,
+  'page-writable cache must not decide whether native controls are hidden'
 );
-assert.equal(earlyStyles.length, 1, 'the early native-control style must be installed once');
-assert.match(
-  earlyStyles[0].textContent,
-  /ytd-reel-video-renderer volume-controls/,
-  'the early style must cover the current Shorts volume control'
-);
+assert.equal(earlyStyles.length, 0, 'trusted bridge code owns early control hiding');
 
 const video = new HTMLMediaElementMock();
 video.volume = 1;

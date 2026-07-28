@@ -5,20 +5,12 @@
 
   const INSTANCE_KEY = Symbol.for('ytev.preload.instance.v1');
   const STATE_CACHE_KEY = 'ytev-volume-state-v1';
-  const EARLY_HIDE_STYLE_ID = 'ytev-early-native-volume-style';
-  const EARLY_HIDE_CLASS = 'ytev-native-volume-hidden';
-  const EARLY_HIDE_MANAGED_CLASS = 'ytev-native-volume-managed';
-  const EARLY_HIDE_CSS = `
-    .${EARLY_HIDE_CLASS} .ytp-volume-area,
-    .${EARLY_HIDE_CLASS} .ytp-volume-panel,
-    .${EARLY_HIDE_CLASS} .ytp-mute-button,
-    .${EARLY_HIDE_CLASS} ytd-reel-video-renderer volume-controls,
-    .${EARLY_HIDE_CLASS} ytd-reel-video-renderer .ytdVolumeControlsHost,
-    .${EARLY_HIDE_CLASS} ytd-shorts-player-controls volume-controls,
-    .${EARLY_HIDE_CLASS} ytd-shorts-player-controls .ytdVolumeControlsHost {
-      visibility: hidden !important;
-    }
-  `;
+  const CHANNEL_PATTERN = /^[a-f0-9]{32}$/;
+  const SECRET_PATTERN = /^[a-f0-9]{64}$/;
+  // localStorage принадлежит странице YouTube и не является доверенным
+  // хранилищем. До прихода состояния из chrome.storage ранний кэш может
+  // только приглушить звук до безопасного потолка, но не дать полный уровень.
+  const EARLY_SAFE_VOLUME_LIMIT = 0.5;
   // Окно доверия держим таким же коротким, как в bridge.js: за это время
   // YouTube успевает применить жест, а лишние секунды только расширяют
   // промежуток, в который может вклиниться скрипт страницы.
@@ -27,8 +19,8 @@
   // огрублённая — как ARIA_TOLERANCE в bridge.js.
   const DOM_TOLERANCE = 0.015;
 
-  const existing = window[INSTANCE_KEY];
-  if (existing && existing.version === 1) return;
+  const existingDescriptor = Object.getOwnPropertyDescriptor(window, INSTANCE_KEY);
+  if (existingDescriptor && existingDescriptor.configurable === false) return;
 
   // Слот реестра занимаем ПЕРВЫМ делом — до всех ранних выходов. Ключ
   // глобального реестра символов угадывается тривиально, а main.js забирает
@@ -38,9 +30,75 @@
   // замороженный объект с делегирующим takeover: реализация подставляется
   // ниже и остаётся в замыкании, поэтому странице её не подменить.
   let takeoverImpl = () => false;
+  let pendingControl = null;
+  let activeControl = null;
+
+  const validControl = (value) =>
+    value &&
+    typeof value === 'object' &&
+    typeof value.dispose === 'function' &&
+    typeof value.update === 'function' &&
+    typeof value.drcRestoreState === 'function';
+
+  // Неизменяемый брокер — единственная точка, через которую service worker
+  // обращается к полному MAIN-инстансу. Код страницы видит методы брокера, но
+  // не знает 256-битный secret из isolated world и не получает ссылку на
+  // control-объект. В отличие от прежнего writable-слота window, подменить
+  // callback и дождаться передачи секрета сюда нельзя.
+  const beginControl = (channel, secret) => {
+    if (!CHANNEL_PATTERN.test(channel) || !SECRET_PATTERN.test(secret)) return false;
+    if (activeControl && activeControl.channel === channel) return false;
+    if (activeControl) {
+      try {
+        activeControl.api.dispose();
+      } catch {}
+    }
+    activeControl = null;
+    pendingControl = { channel, secret };
+    return true;
+  };
+
+  const commitControl = (secret, value) => {
+    if (
+      !pendingControl ||
+      secret !== pendingControl.secret ||
+      !validControl(value)
+    ) {
+      return false;
+    }
+    activeControl = {
+      channel: pendingControl.channel,
+      secret,
+      api: value,
+    };
+    pendingControl = null;
+    return true;
+  };
+
+  const cancelControl = (secret) => {
+    if (!pendingControl || secret !== pendingControl.secret) return false;
+    pendingControl = null;
+    return true;
+  };
+
+  const invokeControl = (secret, operation, payload) => {
+    if (!activeControl || secret !== activeControl.secret) return null;
+    try {
+      if (operation === 'update') return activeControl.api.update(payload);
+      if (operation === 'drcRestoreState') {
+        return activeControl.api.drcRestoreState();
+      }
+    } catch {}
+    return null;
+  };
+
   const api = Object.freeze({
     version: 1,
     takeover: () => takeoverImpl(),
+    beginControl,
+    commitControl,
+    cancelControl,
+    invokeControl,
   });
   try {
     Object.defineProperty(window, INSTANCE_KEY, {
@@ -75,45 +133,17 @@
     return;
   }
 
-  // На повторных загрузках режим своей шкалы уже известен синхронно из кэша.
-  // Прячем штатный контрол до построения YouTube: visibility сохраняет его
-  // размеры, поэтому основной код всё ещё может снять рамку и точку монтажа.
-  if (
-    cached &&
-    cached.useNativeSlider === false &&
-    document.documentElement &&
-    document.documentElement.classList
-  ) {
-    let earlyStyle =
-      typeof document.getElementById === 'function'
-        ? document.getElementById(EARLY_HIDE_STYLE_ID)
-        : null;
-    if (!earlyStyle && typeof document.createElement === 'function') {
-      earlyStyle = document.createElement('style');
-      earlyStyle.id = EARLY_HIDE_STYLE_ID;
-      earlyStyle.textContent = EARLY_HIDE_CSS;
-      document.documentElement.appendChild(earlyStyle);
-    }
-    document.documentElement.classList.add(EARLY_HIDE_CLASS);
-    setTimeout(() => {
-      if (
-        !document.documentElement.classList.contains(
-          EARLY_HIDE_MANAGED_CLASS
-        )
-      ) {
-        document.documentElement.classList.remove(EARLY_HIDE_CLASS);
-      }
-    }, 8000);
-  }
-
   // Отсутствие кэша — это именно «удерживать нечего», а не нулевая
   // громкость. Проверять `Number(cached && cached.volume)` нельзя:
   // при отсутствующем кэше выражение даёт Number(null) === 0, и на первой
   // же загрузке нового профиля preload удерживал бы полную тишину до
   // прихода main.js.
-  const volume =
+  const cachedVolume =
     cached && typeof cached === 'object' ? Number(cached.volume) : NaN;
-  if (!Number.isFinite(volume) || volume < 0 || volume > 1) return;
+  if (!Number.isFinite(cachedVolume) || cachedVolume < 0 || cachedVolume > 1) {
+    return;
+  }
+  const volume = Math.min(cachedVolume, EARLY_SAFE_VOLUME_LIMIT);
   const enabled = !cached || cached.enabled !== false;
   const cachedGamma = Number(cached && cached.gamma);
   const gamma = Number.isFinite(cachedGamma)

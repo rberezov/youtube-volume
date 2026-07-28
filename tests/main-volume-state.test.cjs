@@ -329,7 +329,9 @@ const context = vm.createContext({
 });
 windowMock.window = windowMock;
 let preloadTakeovers = 0;
-windowMock[Symbol.for('ytev.preload.instance.v1')] = {
+let pendingControl = null;
+let activeControl = null;
+const preloadApi = {
   version: 1,
   takeover() {
     preloadTakeovers += 1;
@@ -337,7 +339,36 @@ windowMock[Symbol.for('ytev.preload.instance.v1')] = {
       ? { volume: 0.45, volumeDirty: true }
       : false;
   },
+  beginControl(nextChannel, nextSecret) {
+    if (activeControl && activeControl.channel === nextChannel) return false;
+    if (activeControl) activeControl.api.dispose();
+    activeControl = null;
+    pendingControl = { channel: nextChannel, secret: nextSecret };
+    return true;
+  },
+  commitControl(nextSecret, api) {
+    if (!pendingControl || pendingControl.secret !== nextSecret) return false;
+    activeControl = { ...pendingControl, api };
+    pendingControl = null;
+    return true;
+  },
+  cancelControl(nextSecret) {
+    if (!pendingControl || pendingControl.secret !== nextSecret) return false;
+    pendingControl = null;
+    return true;
+  },
+  invokeControl(nextSecret, operation, payload) {
+    if (!activeControl || activeControl.secret !== nextSecret) return null;
+    if (operation === 'update') return activeControl.api.update(payload);
+    if (operation === 'drcRestoreState') {
+      return activeControl.api.drcRestoreState();
+    }
+    return null;
+  },
 };
+windowMock[Symbol.for('ytev.preload.instance.v1')] = preloadApi;
+const invokeControl = (nextSecret, operation, payload) =>
+  preloadApi.invokeControl(nextSecret, operation, payload);
 
 function runMainTick() {
   assert.ok(domObserverCallback, 'the active MAIN instance must watch the DOM');
@@ -393,9 +424,11 @@ nativeShortsSlider = null;
 
 const instance = windowMock[Symbol.for('ytev.main.instance.v2')];
 assert.equal(instance.version, 2);
+assert.equal(instance.update, undefined, 'the public diagnostic slot must expose no control method');
+assert.equal(instance.dispose, undefined, 'the page must not receive the control disposer');
 assert.equal(
-  instance.update('f'.repeat(64), { settings: { enabled: false } }),
-  false,
+  invokeControl('f'.repeat(64), 'update', { settings: { enabled: false } }),
+  null,
   'an update without the isolated-world secret must be rejected'
 );
 
@@ -412,7 +445,7 @@ videoA.volume = 0.6;
 assert.equal(videoA.volume, 0.6, 'keyboard volume should become the preferred value');
 
 assert.equal(
-  instance.update(secret, {
+  invokeControl(secret, 'update', {
     settings: { useNativeSlider: true },
     state: { savedVolume: 0.4, savedMuted: false },
   }),
@@ -474,14 +507,14 @@ assert.ok(
 // срабатывал никогда. Для muted-autoplay это фатально: без активации
 // документа браузер отклоняет play() у незаглушённого элемента.
 assert.equal(
-  instance.update(secret, { settings: { useNativeSlider: false } }),
+  invokeControl(secret, 'update', { settings: { useNativeSlider: false } }),
   true,
   'switching to the extension slider must be accepted'
 );
 assert.equal(
   JSON.parse(storage.get('ytev-volume-state-v1')).useNativeSlider,
-  false,
-  'the custom-slider choice must be cached for the next document_start'
+  undefined,
+  'page-writable cache must not control native-slider visibility'
 );
 currentVideo = videoA;
 runMainTick();
@@ -574,19 +607,23 @@ assert.equal(
   'takeover must remove Web Audio listeners from every graph, not only the active video'
 );
 assert.equal(
-  nextInstance.update(secret, { settings: { gamma: 2 } }),
-  false,
+  invokeControl(secret, 'update', { settings: { gamma: 2 } }),
+  null,
   'the dead secret of the previous generation must be rejected'
 );
 assert.equal(
-  nextInstance.update(nextSecret, { settings: { gamma: 2 } }),
+  invokeControl(nextSecret, 'update', { settings: { gamma: 2 } }),
   true,
   'the new secret must deliver settings'
 );
 
-// Страница может заранее занять ключ глобального реестра символов — это
-// не повод выключаться: раньше такой захват молча отключал расширение.
-windowMock[Symbol.for('ytev.main.instance.v2')] = { squatted: true };
+// Страница может подменить публичную диагностику, но управление теперь живёт
+// в неизменяемом preload-брокере и смена поколения от этого не зависит.
+Object.defineProperty(windowMock, Symbol.for('ytev.main.instance.v2'), {
+  configurable: true,
+  writable: true,
+  value: { squatted: true },
+});
 assert.equal(
   context.youtubeVolumeMain(
     {

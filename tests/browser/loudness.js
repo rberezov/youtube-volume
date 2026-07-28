@@ -77,7 +77,7 @@ function recordGains() {
 // Макет плеера в той форме, в какой данные приходят от настоящего YouTube.
 // spec: { id, db, offersDrc, drcState, drcStateWhen, preference, preferenceWhen,
 //         noPreference, drcNow, drcWhen, statsDb, statsSilent, responseId,
-//         noDrcState, noDrcSetter }
+//         noDrcState, noDrcSetter, audioTracks, activeTrackId, activeItag }
 // *When — выражения строкой: спек уезжает в страницу как JSON, функции в нём
 // не переживают сериализацию.
 function installPlayer(spec, tone) {
@@ -101,8 +101,22 @@ function installPlayer(spec, tone) {
       },
       extra
     );
-  const formats = [variant({ loudnessDb: spec.db })];
-  if (spec.offersDrc) {
+  const formats = Array.isArray(spec.audioTracks)
+    ? spec.audioTracks.map((track) =>
+        variant({
+          itag: track.itag || 251,
+          loudnessDb: track.db,
+          isDrc: track.isDrc,
+          isVb: track.isVb,
+          audioTrack: {
+            id: track.id,
+            displayName: track.name || track.id,
+            audioIsDefault: track.isDefault === true,
+          },
+        })
+      )
+    : [variant({ loudnessDb: spec.db })];
+  if (!spec.audioTracks && spec.offersDrc) {
     formats.push(variant({ isDrc: true, loudnessDb: 0 }));
     formats.push(variant({ isVb: true, loudnessDb: -4.24 }));
   }
@@ -118,6 +132,15 @@ function installPlayer(spec, tone) {
     },
     streamingData: { adaptiveFormats: formats },
   });
+  if (spec.activeTrackId) {
+    player.getAudioTrack = () => ({
+      id: `${spec.activeItag || 251};opaque-player-track`,
+      // В настоящем объекте имя промежуточного поля минифицировано. Тест
+      // намеренно использует другое имя: расширение должно искать стабильный
+      // вложенный id, а не зависеть от конкретной сборки YouTube.
+      metadata: { id: window.__activeTrackId || spec.activeTrackId },
+    });
+  }
   // 0 — играет DRC, 1 — исходная дорожка. Любое другое значение расширение
   // обязано считать неизвестным.
   if (!spec.noDrcState) {
@@ -155,7 +178,8 @@ function installPlayer(spec, tone) {
     // statsSilent — статистика ещё не отдала уровень (или отдала чужой):
     // сверять не с чем, и снимок считается неполным.
     if (spec.statsSilent) return { volume: '100% / 100%' };
-    const shown = spec.statsDb != null ? spec.statsDb : spec.db;
+    const shown =
+      window.__statsDb != null ? window.__statsDb : spec.statsDb != null ? spec.statsDb : spec.db;
     // Старая форма печатала сам loudnessDb, нынешняя — абсолютный уровень и
     // цель нормализации, а loudnessDb в ней это их разность.
     if (spec.statsLegacy) {
@@ -243,6 +267,57 @@ run('loudness: компенсация тихих роликов', async ({ brows
     quiet.last !== null && Math.abs(quiet.last - BASE_GAIN * boostOf(6)) < 1e-6,
     `${quiet.last} против ожидаемого ${BASE_GAIN * boostOf(6)}`
   );
+
+  const multilingualSpec = {
+    id: 'multilingual',
+    // Общее поле относится к английскому оригиналу, как в реальном Shorts.
+    db: -9.07,
+    activeTrackId: 'ru.3',
+    activeItag: 251,
+    statsDb: -2.7,
+    audioTracks: [
+      { id: 'ru.3', name: 'Russian', db: -2.7, isDefault: true },
+      { id: 'en.4', name: 'English original', db: -9.07 },
+      { id: 'en.4', name: 'English original', db: -1, isDrc: true },
+      { id: 'en.4', name: 'English original', db: 0.57, isVb: true },
+    ],
+  };
+  const multilingual = await measure(multilingualSpec, { maxBoostDb: 15 });
+  check(
+    'многоязычный ролик использует loudnessDb активной русской дорожки',
+    multilingual.last !== null &&
+      Math.abs(multilingual.last - BASE_GAIN * boostOf(2.7)) < 1e-6 &&
+      multilingual.report.trackId === 'ru.3' &&
+      multilingual.report.trackItag === 251 &&
+      multilingual.report.dbSource === 'audioTrack',
+    JSON.stringify(multilingual.report)
+  );
+
+  {
+    const page = await play(multilingualSpec, { maxBoostDb: 15 });
+    await page.waitForTimeout(1200);
+    const before = await readAll(page);
+    const after = await page.evaluate(async () => {
+      window.__activeTrackId = 'en.4';
+      window.__statsDb = -9.07;
+      document.querySelector('video').dispatchEvent(new Event('durationchange'));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return {
+        gains: window.__gains.slice(),
+        report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
+      };
+    });
+    await page.close();
+    check(
+      'смена аудиодорожки в том же ролике сразу пересчитывает усиление',
+      Math.abs(before.report.boostDb - 2.7) < 0.01 &&
+        Math.abs(after.report.boostDb - 9.07) < 0.01 &&
+        after.report.trackId === 'en.4' &&
+        after.gains.length > 0 &&
+        Math.abs(after.gains.at(-1) - BASE_GAIN * boostOf(9.07)) < 1e-6,
+      `${JSON.stringify(before.report)} → ${JSON.stringify(after.report)}`
+    );
+  }
 
   const off = await measure({ id: 'off', db: -6 }, { normalize: false });
   check(
