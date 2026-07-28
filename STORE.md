@@ -35,7 +35,12 @@
 • Громкость и состояние «звук выключен» сохраняются и переносятся между
   обычными видео, Shorts и новыми вкладками.
 • Колесо мыши над ползунком: ±1%, с Shift — ±0.1%.
-• Автосворачивание: без курсора остаётся аккуратная круглая кнопка.
+• Автосворачивание: без курсора остаётся аккуратная круглая кнопка. Шкала
+  выезжает и убирается плавно, проценты появляются следом за ней. Есть режим
+  с задержкой перед сворачиванием — удобно с длинной шкалой.
+• Выравнивание громкости роликов, по желанию: тихие подтягиваются к общему
+  уровню, не больше чем на 6 дБ. Пригодится, когда «стабильная громкость»
+  YouTube выключена или недоступна; по умолчанию выключено.
 • Режим «использовать шкалу YouTube»: свой ползунок не строится, а
   экспоненциальная кривая продолжает работать.
 • Если в панели не хватает места, ползунок укорачивается, затем прячутся
@@ -82,7 +87,12 @@ WHAT ELSE
 • Volume and mute state are remembered and carried across regular videos,
   Shorts and new tabs.
 • Mouse wheel over the slider: ±1%, with Shift ±0.1%.
-• Auto-collapse: with the pointer away only a neat round button remains.
+• Auto-collapse: with the pointer away only a neat round button remains. The
+  slider slides out and back smoothly, with the percentage following it. A
+  collapse delay mode is available — handy with a long slider.
+• Optional loudness matching across videos: quiet ones are brought up towards
+  a common level, by no more than 6 dB. Useful when YouTube's own stable
+  volume is off or unavailable; disabled by default.
 • "Use the YouTube slider" mode: no custom slider is built, while the
   exponential curve keeps working.
 • When the control bar runs out of room the slider shrinks, then the
@@ -136,7 +146,8 @@ Chrome Web Store требует объяснить каждое разрешен
 1. **Обычное видео, ползунок развёрнут** — панель плеера с длинной шкалой и
    процентами. Основной кадр, ставить первым.
 2. **Popup с настройками** — видно крутизну кривой и пример «при положении 50%
-   звук будет ≈ 13%».
+   звук будет ≈ 13%», а ниже — переключатели, включая выравнивание громкости
+   роликов.
 3. **Shorts** — блок громкости на месте штатного контрола.
 4. **Автосворачивание** — круглая кнопка без курсора рядом с развёрнутым
    состоянием (можно одним кадром «до/после»).
