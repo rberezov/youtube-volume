@@ -22,6 +22,7 @@ const HARNESSES = [
   'generation.js',
   'preload-silence.js',
   'loudness.js',
+  'audio-level.js',
 ];
 
 const only = process.argv.slice(2);
