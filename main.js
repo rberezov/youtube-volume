@@ -507,6 +507,83 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     return target instanceof Element && !!target.closest(PLAYER_SELECTOR);
   };
 
+  // Переключение звука: одно на кнопку и на клавишу.
+  //
+  // rescueSilent — поведение кнопки: на нулевой громкости она возвращает
+  // последний слышимый уровень, иначе выглядит мёртвой. Клавише это не
+  // подходит: у YouTube m на нуле только переключает флаг, и делай мы иначе,
+  // одна и та же клавиша вела бы себя по-разному на латинской раскладке
+  // (сработал YouTube) и на кириллице (сработали мы).
+  function toggleMute(rescueSilent = true) {
+    const player = getPlayer();
+    const video = getVideo();
+    if (!video) return;
+    dropVolumeIntent();
+    const silent = rescueSilent && video.volume === 0;
+    if (video.muted || silent) {
+      rememberMuted(false, true);
+      if (player && typeof player.unMute === 'function') player.unMute();
+      video.muted = false;
+      // На нулевой громкости снятия mute мало: уровень остаётся нулевым и
+      // кнопка выглядит мёртвой (щёлкаешь — тишина, и обратно не
+      // выключается). Возвращаем последний слышимый уровень, как это
+      // делает штатная кнопка YouTube, через общий путь ползунка — он
+      // сам снимет mute у плеера, сохранит значение и отложенно отдаст
+      // его в настройки YouTube.
+      if (silent && ui) {
+        ui.slider.value = String(lastAudibleVolume * 100);
+        applySliderValue(ui.slider);
+      }
+    } else {
+      rememberMuted(true, true);
+      if (player && typeof player.mute === 'function') player.mute();
+      else video.muted = true;
+    }
+  }
+
+  function togglePlay(video) {
+    const player = getPlayer();
+    if (video.paused) {
+      if (player && typeof player.playVideo === 'function') player.playVideo();
+      else video.play().catch(() => {});
+    } else if (player && typeof player.pauseVideo === 'function') {
+      player.pauseVideo();
+    } else {
+      video.pause();
+    }
+  }
+
+  /* ---- Горячие клавиши и раскладка ------------------------------------- *
+   *
+   * YouTube опознаёт свои горячие клавиши по `e.key`, то есть по введённому
+   * символу. На нелатинской раскладке символ другой (m — это «ь», k — «л»), и
+   * клавиши не срабатывают вовсе: ни отключение звука, ни пауза. Раскладку
+   * переключать ради паузы приходится вручную.
+   *
+   * Мы опознаём клавишу дополнительно по `e.code` — это физическая клавиша,
+   * от раскладки не зависящая. Но просто «сделать самим» нельзя: на латинской
+   * раскладке сработал бы и YouTube, и мы, то есть звук переключился бы
+   * дважды и остался прежним. Поэтому действие выполняется только если через
+   * такт состояние плеера не изменилось.
+   *
+   * Проверка по факту, а не по списку раскладок, здесь принципиальна: она
+   * одинаково верна и сейчас, и если YouTube однажды научится понимать «ь»
+   * сам — тогда мы просто перестанем вмешиваться, без единой правки.
+   * ---------------------------------------------------------------------- */
+  const HOTKEY_MUTE = { code: 'KeyM', letter: 'm' };
+  const HOTKEY_PLAY = { code: 'KeyK', letter: 'k' };
+  const pressed = (e, key) =>
+    e.code === key.code || String(e.key).toLowerCase() === key.letter;
+
+  // Отложенная проверка: YouTube обрабатывает keydown синхронно, поэтому к
+  // следующей задаче его решение уже принято.
+  function unlessHandled(check, act) {
+    const before = check();
+    setTimeout(() => {
+      if (check() === before) act();
+    }, 0);
+  }
+
   // Внешние способы управления YouTube тоже считаются осознанным выбором:
   // стрелки/колесо и штатная шкала должны обновлять preferredVolume, а не
   // выглядеть как очередной автоматический сброс при смене media.
@@ -537,11 +614,37 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         if (!isShorts() && insidePlayer(target)) markVolumeIntent();
         return;
       }
-      if (String(e.key).toLowerCase() !== 'm' || e.repeat) return;
-      markMutedIntent();
-      dropVolumeIntent();
-      const video = getVideo();
-      if (video) rememberMuted(!video.muted, true);
+      if (e.repeat) return;
+      if (pressed(e, HOTKEY_MUTE)) {
+        markMutedIntent();
+        dropVolumeIntent();
+        const video = getVideo();
+        if (!video) return;
+        rememberMuted(!video.muted, true);
+        unlessHandled(
+          () => video.muted,
+          () => {
+            if (getVideo() === video) toggleMute(false);
+          }
+        );
+        return;
+      }
+      // Пауза к громкости отношения не имеет, и в расширении её бы не было —
+      // если бы не та же причина: на нелатинской раскладке k у YouTube не
+      // работает. Вмешиваемся только когда он не сработал.
+      if (pressed(e, HOTKEY_PLAY)) {
+        // Отдельной проверки страницы не нужно: вне Shorts getPlayer() —
+        // это #movie_player, и в ленте, где играет только предпросмотр,
+        // видео отсюда не возьмётся.
+        const video = getVideo();
+        if (!video) return;
+        unlessHandled(
+          () => video.paused,
+          () => {
+            if (getVideo() === video) togglePlay(video);
+          }
+        );
+      }
     },
     true
   );
@@ -2898,32 +3001,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     muteBtn.type = 'button';
     muteBtn.setAttribute('aria-keyshortcuts', 'm');
     muteBtn.appendChild(buildIcon());
-    muteBtn.addEventListener('click', () => {
-      const player = getPlayer();
-      const video = getVideo();
-      if (!video) return;
-      dropVolumeIntent();
-      const silent = video.volume === 0;
-      if (video.muted || silent) {
-        rememberMuted(false, true);
-        if (player && typeof player.unMute === 'function') player.unMute();
-        video.muted = false;
-        // На нулевой громкости снятия mute мало: уровень остаётся нулевым и
-        // кнопка выглядит мёртвой (щёлкаешь — тишина, и обратно не
-        // выключается). Возвращаем последний слышимый уровень, как это
-        // делает штатная кнопка YouTube, через общий путь ползунка — он
-        // сам снимет mute у плеера, сохранит значение и отложенно отдаст
-        // его в настройки YouTube.
-        if (silent && ui) {
-          ui.slider.value = String(lastAudibleVolume * 100);
-          applySliderValue(ui.slider);
-        }
-      } else {
-        rememberMuted(true, true);
-        if (player && typeof player.mute === 'function') player.mute();
-        else video.muted = true;
-      }
-    });
+    muteBtn.addEventListener('click', () => toggleMute());
 
     const slider = document.createElement('input');
     slider.type = 'range';

@@ -356,7 +356,12 @@
         if (!isShorts() && closest(e.target, PLAYER_SELECTOR)) {
           grantVolumeFromDom();
         }
-      } else if (!e.repeat && String(e.key).toLowerCase() === 'm') {
+        // Клавиша опознаётся и по коду физической клавиши: на нелатинской
+        // раскладке символ другой («ь»), и по одному лишь e.key окно записи
+        // не открывалось — звук переключался, а состояние не сохранялось.
+        // Остальные условия те же: доверенное событие, без модификаторов, вне
+        // поля ввода, и ожидаемое значение сверяется с DOM.
+      } else if (!e.repeat && (e.code === 'KeyM' || String(e.key).toLowerCase() === 'm')) {
         const video = activeVideo();
         grantMutedIntent(INTENT_WINDOW_MS, video ? !video.muted : undefined);
       }

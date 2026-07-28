@@ -23,6 +23,7 @@ const HARNESSES = [
   'preload-silence.js',
   'loudness.js',
   'audio-level.js',
+  'hotkeys.js',
 ];
 
 const only = process.argv.slice(2);
