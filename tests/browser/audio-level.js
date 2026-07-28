@@ -279,6 +279,7 @@ run('audio-level: реальный уровень сигнала на выход
       },
       { timeout: 8000, what: 'первых отсчётов через граф' }
     );
+    await waitForStableLevel(page);
     return page;
   }
 
@@ -295,6 +296,35 @@ run('audio-level: реальный уровень сигнала на выход
       ...stats,
       rms: stats.frames ? Math.sqrt(stats.sumSq / stats.frames) : 0,
     };
+  }
+
+  // Первые отсчёты доказывают, что граф подключён, но ещё не доказывают, что
+  // закончилась пачка media-событий от нового src. Если setTargetAtTime попал
+  // внутрь проверочного окна, его максимальный пик навсегда сохранял
+  // промежуточный уровень и делал тест зависимым от скорости runner.
+  //
+  // Ждём факта стабилизации самого выходного сигнала: три последовательных
+  // коротких окна должны совпасть. Внутренние target/boost не читаем, поэтому
+  // последующие проверки по-прежнему измеряют результат, а не намерение кода.
+  async function waitForStableLevel(page) {
+    let previousPeak = null;
+    let stableWindows = 0;
+    await waitFor(
+      async () => {
+        const current = await level(page, 120);
+        if (!(current.peak > 0)) {
+          previousPeak = null;
+          stableWindows = 0;
+          return false;
+        }
+        const stable =
+          previousPeak !== null && Math.abs(dB(current.peak, previousPeak)) < 0.02;
+        stableWindows = stable ? stableWindows + 1 : 0;
+        previousPeak = current.peak;
+        return stableWindows >= 2;
+      },
+      { timeout: 5000, step: 0, what: 'стабильного уровня выходного сигнала' }
+    );
   }
 
   const show = (value) => value.toFixed(4);
