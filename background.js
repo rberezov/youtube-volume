@@ -39,6 +39,18 @@ function storageGet(area, defaults) {
   });
 }
 
+function storageSet(area, value) {
+  return new Promise((resolve, reject) => {
+    chrome.storage[area].set(value, () => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
 function targetFrom(sender) {
   return {
     tabId: sender.tab.id,
@@ -52,6 +64,18 @@ function updateYouTubeVolumeMain(secret, payload) {
     return false;
   }
   return instance.update(secret, payload);
+}
+
+function readYouTubeVolumeDrcRestoreState(secret) {
+  const instance = window[Symbol.for('ytev.main.instance.v2')];
+  if (
+    !instance ||
+    instance.version !== 2 ||
+    typeof instance.drcRestoreState !== 'function'
+  ) {
+    return null;
+  }
+  return instance.drcRestoreState(secret);
 }
 
 // main.js работает в MAIN-мире страницы, где chrome.i18n недоступен, поэтому
@@ -76,7 +100,11 @@ function uiStrings() {
 async function initialize(sender, channel, secret) {
   const [settings, state] = await Promise.all([
     storageGet('sync', DEFAULTS),
-    storageGet('local', { savedVolume: null, savedMuted: null }),
+    storageGet('local', {
+      savedVolume: null,
+      savedMuted: null,
+      restoreYoutubeDrc: null,
+    }),
   ]);
   const results = await chrome.scripting.executeScript({
     target: targetFrom(sender),
@@ -98,6 +126,21 @@ async function updateSettings(sender, secret) {
   return results.some((result) => result && result.result === true);
 }
 
+async function syncDrcState(sender, secret) {
+  const results = await chrome.scripting.executeScript({
+    target: targetFrom(sender),
+    world: 'MAIN',
+    func: readYouTubeVolumeDrcRestoreState,
+    args: [secret],
+  });
+  const state = results.find(
+    (result) => result && typeof result.result === 'boolean'
+  );
+  if (!state) return false;
+  await storageSet('local', { restoreYoutubeDrc: state.result });
+  return true;
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (
     !allowedSender(sender) ||
@@ -113,6 +156,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     operation = initialize(sender, message.channel, message.secret);
   } else if (message.type === 'YTEV_UPDATE_SETTINGS') {
     operation = updateSettings(sender, message.secret);
+  } else if (message.type === 'YTEV_SYNC_DRC_STATE') {
+    operation = syncDrcState(sender, message.secret);
   } else {
     return false;
   }

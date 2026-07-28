@@ -82,7 +82,7 @@
     "message": "Выравнивать громкость роликов"
   },
   "normalizeDescription": {
-    "message": "Подтягивать тихие ролики к общему уровню"
+    "message": "Заменить Stable Volume YouTube своим выравниванием"
   },
   "maxBoostTitle": {
     "message": "Предел подъёма",

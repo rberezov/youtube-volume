@@ -6,6 +6,7 @@ const vm = require('node:vm');
 
 let onMessage;
 const injections = [];
+const localWrites = [];
 const mainFunction = function youtubeVolumeMain() {};
 
 const chromeMock = {
@@ -37,6 +38,10 @@ const chromeMock = {
     local: {
       get(defaults, callback) {
         callback({ ...defaults, savedVolume: 0.42, savedMuted: false });
+      },
+      set(value, callback) {
+        localWrites.push(value);
+        callback();
       },
     },
   },
@@ -107,6 +112,7 @@ async function run() {
   assert.equal(injections[0].args[0].channel, channel);
   assert.equal(injections[0].args[0].settings.gamma, 2.5);
   assert.equal(injections[0].args[0].state.savedVolume, 0.42);
+  assert.equal(injections[0].args[0].state.restoreYoutubeDrc, null);
   // main.js работает в MAIN-мире, где chrome.i18n недоступен: подписи обязаны
   // уехать готовыми вместе с настройками, иначе кнопка останется без текста.
   assert.equal(
@@ -132,6 +138,22 @@ async function run() {
   assert.equal(injections[1].args[0], secret);
   assert.equal(injections[1].args[1].settings.shortsScale, 60);
   assert.equal('state' in injections[1].args[1], false);
+
+  let drcSyncResponse;
+  assert.equal(
+    onMessage({ type: 'YTEV_SYNC_DRC_STATE', channel, secret }, sender, (value) => {
+      drcSyncResponse = value;
+    }),
+    true
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(drcSyncResponse.ok, true);
+  assert.equal(injections.length, 3);
+  assert.equal(injections[2].world, 'MAIN');
+  assert.equal(injections[2].func.name, 'readYouTubeVolumeDrcRestoreState');
+  assert.equal(injections[2].args[0], secret);
+  assert.equal(localWrites.length, 1);
+  assert.equal(localWrites[0].restoreYoutubeDrc, true);
 
   const manifest = JSON.parse(
     fs.readFileSync(require.resolve('../manifest.json'), 'utf8')

@@ -40,6 +40,8 @@
   let pendingWrite = {};
   let writeTimer = 0;
   let lastWriteAt = 0;
+  let drcSyncTimer = 0;
+  let drcSyncRetries = 0;
 
   // Читаем только один безопасный UI-флаг прямо из chrome.storage: для этого
   // не нужно будить service worker. На document_start правило успевает встать
@@ -508,6 +510,35 @@
     writeTimer = setTimeout(flushWrite, delay);
   }
 
+  function scheduleDrcStateSync(delay = 0) {
+    if (!alive() || drcSyncTimer) return;
+    drcSyncTimer = -1;
+    const timer = setTimeout(() => {
+      drcSyncTimer = 0;
+      try {
+        chrome.runtime.sendMessage(
+          {
+            type: 'YTEV_SYNC_DRC_STATE',
+            channel: activeChannel,
+            secret: updateSecret,
+          },
+          (response) => {
+            void chrome.runtime.lastError;
+            if (response && response.ok) {
+              drcSyncRetries = 0;
+              return;
+            }
+            drcSyncRetries += 1;
+            if (drcSyncRetries <= 10) scheduleDrcStateSync(100);
+          }
+        );
+      } catch {}
+    }, delay);
+    // Не перезаписываем 0, если тестовая/нестандартная реализация таймера
+    // вызвала callback синхронно.
+    if (drcSyncTimer === -1) drcSyncTimer = timer;
+  }
+
   window.addEventListener('message', (e) => {
     if (e.source !== window || e.origin !== PAGE_ORIGIN || !e.data) return;
     if (e.data.channel !== activeChannel) return;
@@ -532,6 +563,13 @@
         return;
       }
       queueWrite({ savedMuted: e.data.muted });
+      return;
+    }
+    if (e.data.type === 'YTEV_DRC_STATE_DIRTY') {
+      // Сообщение страницы содержит только сигнал, но не состояние и не
+      // секрет. Service worker сам прочитает boolean из доверенного экземпляра
+      // MAIN-логики; поддельное сообщение способно лишь инициировать проверку.
+      scheduleDrcStateSync();
     }
   });
 

@@ -77,9 +77,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     teardown.push(() => target.removeEventListener(type, handler, options));
   }
 
-  // Потолок для настройки «предел подъёма»: выше у материала обычно уже нет
-  // запаса до пика, а лимитера у нас нет.
-  const MAX_BOOST_LIMIT_DB = 10;
+  // Потолок для настройки «предел подъёма». Это уже большой запас, поэтому
+  // пользователь включает его осознанно: у самых тихих записей он полезен,
+  // но при ошибочном loudnessDb может приблизить пики к перегрузке.
+  const MAX_BOOST_LIMIT_DB = 15;
 
   const SETTINGS = {
     enabled: true,          // применять экспоненциальную кривую
@@ -814,6 +815,183 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   ];
   let loudnessBoost = 1;
   let loudnessKey = '';
+  const YOUTUBE_NORMALIZATION_GUARD_MS = 1000;
+  const YOUTUBE_NORMALIZATION_RETRY_MS = 100;
+  let youtubeNormalizationGuardTimer = 0;
+  let youtubeNormalizationRestoreTimer = 0;
+  let youtubeNormalizationPending = false;
+  let youtubeNormalizationApiAvailable = false;
+  let youtubeNormalizationForcedOff = false;
+  let youtubeNormalizationRetryCount = 0;
+  let youtubeDrcRestoreNeeded = false;
+  let youtubeDrcRestoreStateLoaded = false;
+  let youtubeDrcRestoreStateTracked = false;
+
+  function requestYouTubeDrcStateSync() {
+    window.postMessage(
+      {
+        type: 'YTEV_DRC_STATE_DIRTY',
+        channel: CHANNEL_ID,
+      },
+      PAGE_ORIGIN
+    );
+  }
+
+  function rememberYouTubeDrcWasEnabled() {
+    if (youtubeDrcRestoreStateTracked && youtubeDrcRestoreNeeded) return;
+    youtubeDrcRestoreStateTracked = true;
+    youtubeDrcRestoreNeeded = true;
+    requestYouTubeDrcStateSync();
+  }
+
+  function rememberYouTubeDrcWasDisabled() {
+    if (youtubeDrcRestoreStateTracked) return;
+    youtubeDrcRestoreStateTracked = true;
+    youtubeDrcRestoreNeeded = false;
+    requestYouTubeDrcStateSync();
+  }
+
+  function scheduleYouTubeNormalizationGuard(delay = YOUTUBE_NORMALIZATION_GUARD_MS) {
+    if (!SETTINGS.normalizeLoudness || youtubeNormalizationGuardTimer) return;
+    youtubeNormalizationGuardTimer = setTimeout(() => {
+      youtubeNormalizationGuardTimer = 0;
+      if (!SETTINGS.normalizeLoudness) return;
+      const wasPending = youtubeNormalizationPending;
+      const ready = disableYouTubeNormalization(getPlayer());
+      // После setDrcUserPreference(0) YouTube перезагружает аудиодорожку.
+      // События media обычно сами вызывают refreshLoudness(), но этот путь
+      // гарантирует пересчёт и в сборке, которая не прислала ни одного из них.
+      if (ready && wasPending) refreshLoudness();
+    }, delay);
+  }
+
+  function stopYouTubeNormalizationGuard() {
+    clearTimeout(youtubeNormalizationGuardTimer);
+    youtubeNormalizationGuardTimer = 0;
+    youtubeNormalizationPending = false;
+    youtubeNormalizationRetryCount = 0;
+  }
+
+  function stopYouTubeNormalizationRestore() {
+    clearTimeout(youtubeNormalizationRestoreTimer);
+    youtubeNormalizationRestoreTimer = 0;
+  }
+
+  function scheduleYouTubeNormalizationRestore(delay = YOUTUBE_NORMALIZATION_GUARD_MS) {
+    if (
+      SETTINGS.normalizeLoudness ||
+      !youtubeDrcRestoreNeeded ||
+      youtubeNormalizationRestoreTimer
+    ) {
+      return;
+    }
+    youtubeNormalizationRestoreTimer = setTimeout(() => {
+      youtubeNormalizationRestoreTimer = 0;
+      if (SETTINGS.normalizeLoudness || !youtubeDrcRestoreNeeded) return;
+      if (restoreYouTubeNormalization(getPlayer())) refreshLoudness();
+    }, delay);
+  }
+
+  /**
+   * Возвращаем YouTube Stable Volume только если расширение само выключило
+   * ранее включённое предпочтение. Если пользователь держал Stable Volume
+   * выключенной, маркера нет и расширение не меняет его выбор.
+   */
+  function restoreYouTubeNormalization(player) {
+    stopYouTubeNormalizationGuard();
+    youtubeNormalizationForcedOff = false;
+    youtubeNormalizationPending = false;
+    if (!youtubeDrcRestoreNeeded) {
+      stopYouTubeNormalizationRestore();
+      return true;
+    }
+
+    const hasSetter = !!(player && typeof player.setDrcUserPreference === 'function');
+    youtubeNormalizationApiAvailable =
+      hasSetter && typeof player.getDrcUserPreference === 'function';
+    if (!hasSetter) {
+      scheduleYouTubeNormalizationRestore();
+      return false;
+    }
+
+    try {
+      // Это глобальное предпочтение YouTube. Сам плеер применит DRC только к
+      // роликам, для которых такая дорожка действительно существует.
+      player.setDrcUserPreference(1);
+      youtubeDrcRestoreNeeded = false;
+      requestYouTubeDrcStateSync();
+      stopYouTubeNormalizationRestore();
+      resetLoudness();
+      return true;
+    } catch {
+      scheduleYouTubeNormalizationRestore();
+      return false;
+    }
+  }
+
+  /**
+   * Наша нормализация и YouTube Stable Volume не должны работать одновременно.
+   *
+   * Текущий плеер публикует setDrcUserPreference(0) — ровно тот же путь,
+   * которым пользуется штатный переключатель. Вызов сохраняет предпочтение,
+   * выбирает исходную дорожку и перезагружает звук. Проверяем его постоянно:
+   * YouTube пересоздаёт плеер при SPA-переходах и может снова применить свою
+   * настройку уже после того, как расширение обработало первый кадр.
+   */
+  function disableYouTubeNormalization(player) {
+    if (!SETTINGS.normalizeLoudness) {
+      return restoreYouTubeNormalization(player);
+    }
+
+    stopYouTubeNormalizationRestore();
+    const hasGetter = !!(player && typeof player.getDrcUserPreference === 'function');
+    const hasSetter = !!(player && typeof player.setDrcUserPreference === 'function');
+    youtubeNormalizationApiAvailable = hasGetter && hasSetter;
+    const preference = hasGetter ? callPlayer(player, 'getDrcUserPreference') : undefined;
+    const normalizedPreference = Number(preference);
+
+    if (normalizedPreference === 0) {
+      rememberYouTubeDrcWasDisabled();
+      youtubeNormalizationPending = false;
+      youtubeNormalizationForcedOff = true;
+      youtubeNormalizationRetryCount = 0;
+      scheduleYouTubeNormalizationGuard();
+      return true;
+    }
+
+    // На старой/экспериментальной сборке getter может отсутствовать отдельно.
+    // Успешный вызов штатного setter всё равно является лучшим доступным
+    // подтверждением: он синхронно сохраняет 0 и запускает смену дорожки.
+    if (!hasGetter && hasSetter) {
+      try {
+        player.setDrcUserPreference(0);
+        youtubeNormalizationPending = false;
+        youtubeNormalizationForcedOff = true;
+        youtubeNormalizationRetryCount = 0;
+        scheduleYouTubeNormalizationGuard();
+        return true;
+      } catch {}
+    }
+
+    youtubeNormalizationPending = true;
+    youtubeNormalizationForcedOff = false;
+    if (normalizedPreference === 1) rememberYouTubeDrcWasEnabled();
+    // Пока исходная дорожка не подтверждена, снимаем прежнее усиление: иначе
+    // на короткое время получилась бы двойная нормализация поверх активного DRC.
+    if (preference !== undefined) resetLoudness();
+    if (hasSetter) {
+      try {
+        player.setDrcUserPreference(0);
+      } catch {}
+    }
+    youtubeNormalizationRetryCount += 1;
+    scheduleYouTubeNormalizationGuard(
+      hasGetter && hasSetter && youtubeNormalizationRetryCount <= 10
+        ? YOUTUBE_NORMALIZATION_RETRY_MS
+        : YOUTUBE_NORMALIZATION_GUARD_MS
+    );
+    return false;
+  }
 
   /* ---- Почему решение спрашивается у плеера, а не собирается по кусочкам --
    *
@@ -1004,7 +1182,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   }
 
   function refreshLoudness() {
-    const snap = readLoudness(getPlayer());
+    const player = getPlayer();
+    const youtubeNormalizationDisabled = disableYouTubeNormalization(player);
+    const snap = readLoudness(player);
     // Ролик сменился — прежнее решение недействительно, и ждать полного
     // снимка нельзя. bindVideo() сюда не поможет: он выходит первой строкой,
     // если <video> тот же, а YouTube переиспользует элемент для следующего
@@ -1013,10 +1193,17 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     if (snap.id && loudnessKey && !loudnessKey.startsWith(snap.id + '|')) {
       resetLoudness();
     }
-    if (!snap.complete) return;
-    // В ключ входит признак DRC — «стабильную громкость» можно переключить
-    // прямо во время ролика — и состояние настройки: подъём тихих зависит
-    // от неё, и при переключении решение обязано пересчитаться.
+    // Если API переключателя исчез, но статистика уже однозначно подтверждает
+    // исходную дорожку, применять нашу нормализацию безопасно. При DRC или
+    // неизвестном состоянии остаёмся на единичном усилении.
+    if (
+      !snap.complete ||
+      (SETTINGS.normalizeLoudness && !youtubeNormalizationDisabled && snap.drc)
+    ) {
+      return;
+    }
+    // В ключ входит признак DRC для режима с выключенной нашей нормализацией
+    // и сама настройка: при её переключении решение обязано пересчитаться.
     const key = `${snap.id}|${snap.drc ? 'drc' : 'raw'}|${
       SETTINGS.normalizeLoudness ? SETTINGS.maxBoostDb : 'off'
     }`;
@@ -1037,8 +1224,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
    * на 3.5дБ громче, чем без расширения. Раз громкость перехватываем мы,
    * применять его тоже нам.
    *
-   * Подъём тихих — наша добавка, её и включает настройка.
-   * При активном DRC не делаем ничего: дорожка уже сведена к цели.
+   * Подъём тихих — наша добавка, её и включает настройка. При включённой
+   * настройке Stable Volume уже принудительно выключена и здесь всегда
+   * обрабатывается исходная дорожка. В режиме без нашей нормализации активный
+   * DRC по-прежнему оставляем как есть.
    */
   function loudnessDbFor(snap) {
     if (snap.drc) return 0;
@@ -1311,13 +1500,34 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   function applyTrustedPayload(payload, includeState = false) {
     if (!payload || typeof payload !== 'object') return false;
+    const state =
+      includeState && payload.state && typeof payload.state === 'object'
+        ? payload.state
+        : {};
+    // Сначала читаем маркер восстановления, и только потом применяем настройки:
+    // refreshLoudness() может сразу выключить YouTube DRC. При обратном порядке
+    // после перезапуска терялось бы знание, что DRC нужно вернуть.
+    if (includeState && !youtubeDrcRestoreStateLoaded) {
+      youtubeDrcRestoreStateTracked =
+        typeof state.restoreYoutubeDrc === 'boolean';
+      youtubeDrcRestoreNeeded = state.restoreYoutubeDrc === true;
+      youtubeDrcRestoreStateLoaded = true;
+      // Миграция с 1.31.0: та версия уже могла сохранить YouTube preference=0,
+      // но ещё не записывала исходное состояние. Если наша нормализация была
+      // включена во время обновления, один раз считаем DRC отключённой нами.
+      if (
+        !youtubeDrcRestoreStateTracked &&
+        payload.settings &&
+        payload.settings.normalizeLoudness === true
+      ) {
+        youtubeDrcRestoreStateTracked = true;
+        youtubeDrcRestoreNeeded = true;
+        requestYouTubeDrcStateSync();
+      }
+    }
     applySettings(payload.settings);
     applyStrings(payload.strings);
     if (!volumeStateLoaded) {
-      const state =
-        includeState && payload.state && typeof payload.state === 'object'
-          ? payload.state
-          : {};
       const savedValue = state.savedVolume;
       const savedVolume = Number(savedValue);
       if (!preferredVolumeDirty && savedValue != null && validVolume(savedVolume)) {
@@ -1380,6 +1590,14 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         stats: snap.stats,
         state: snap.state,
         preference: snap.preference,
+        youtubeNormalizationDisabled:
+          !SETTINGS.normalizeLoudness || youtubeNormalizationForcedOff,
+        youtubeNormalizationPending,
+        youtubeNormalizationApiAvailable,
+        youtubeDrcRestoreNeeded,
+        youtubeDrcRestoreStateTracked,
+        youtubeNormalizationRestorePending:
+          !SETTINGS.normalizeLoudness && youtubeDrcRestoreNeeded,
         boost: loudnessBoost,
         boostDb: Number((20 * Math.log10(loudnessBoost)).toFixed(2)),
         maxBoostDb: SETTINGS.maxBoostDb,
@@ -1388,6 +1606,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     update(candidateSecret, payload) {
       if (candidateSecret !== updateSecret) return false;
       return applyTrustedPayload(payload, false);
+    },
+    drcRestoreState(candidateSecret) {
+      if (candidateSecret !== updateSecret) return null;
+      return youtubeDrcRestoreNeeded;
     },
   });
 
@@ -3284,6 +3506,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     clearTimeout(saveMutedTimer);
     clearTimeout(persistTimer);
     clearTimeout(earlyHideSafetyTimer);
+    clearTimeout(youtubeNormalizationGuardTimer);
+    clearTimeout(youtubeNormalizationRestoreTimer);
     for (const off of teardown.splice(0)) {
       try {
         off();
