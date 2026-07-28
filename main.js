@@ -815,17 +815,22 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   ];
   let loudnessBoost = 1;
   let loudnessKey = '';
-  const YOUTUBE_NORMALIZATION_GUARD_MS = 1000;
-  const YOUTUBE_NORMALIZATION_RETRY_MS = 100;
-  let youtubeNormalizationGuardTimer = 0;
-  let youtubeNormalizationRestoreTimer = 0;
   let youtubeNormalizationPending = false;
   let youtubeNormalizationApiAvailable = false;
   let youtubeNormalizationForcedOff = false;
-  let youtubeNormalizationRetryCount = 0;
+  let youtubeNormalizationGeneration = 0;
   let youtubeDrcRestoreNeeded = false;
   let youtubeDrcRestoreStateLoaded = false;
   let youtubeDrcRestoreStateTracked = false;
+  let youtubeDrcSetterGuard = null;
+  const mediaObjectIds = new WeakMap();
+  const mediaSourceIds = new WeakMap();
+  let nextMediaObjectId = 1;
+  let nextMediaSourceId = 1;
+  let observedMediaRevision = '';
+  let completeMediaRevision = '';
+  let mediaLoudnessRefreshTimer = 0;
+  let mediaLoudnessRefreshForced = false;
 
   function requestYouTubeDrcStateSync() {
     window.postMessage(
@@ -851,45 +856,79 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     requestYouTubeDrcStateSync();
   }
 
-  function scheduleYouTubeNormalizationGuard(delay = YOUTUBE_NORMALIZATION_GUARD_MS) {
-    if (!SETTINGS.normalizeLoudness || youtubeNormalizationGuardTimer) return;
-    youtubeNormalizationGuardTimer = setTimeout(() => {
-      youtubeNormalizationGuardTimer = 0;
-      if (!SETTINGS.normalizeLoudness) return;
-      const wasPending = youtubeNormalizationPending;
-      const ready = disableYouTubeNormalization(getPlayer());
-      // После setDrcUserPreference(0) YouTube перезагружает аудиодорожку.
-      // События media обычно сами вызывают refreshLoudness(), но этот путь
-      // гарантирует пересчёт и в сборке, которая не прислала ни одного из них.
-      if (ready && wasPending) refreshLoudness();
-    }, delay);
+  function rememberYouTubeDrcUserIntent(enabled) {
+    const needed = enabled === true;
+    if (youtubeDrcRestoreStateTracked && youtubeDrcRestoreNeeded === needed) return;
+    youtubeDrcRestoreStateTracked = true;
+    youtubeDrcRestoreNeeded = needed;
+    requestYouTubeDrcStateSync();
   }
 
-  function stopYouTubeNormalizationGuard() {
-    clearTimeout(youtubeNormalizationGuardTimer);
-    youtubeNormalizationGuardTimer = 0;
-    youtubeNormalizationPending = false;
-    youtubeNormalizationRetryCount = 0;
+  function releaseYouTubeDrcSetterGuard() {
+    const guard = youtubeDrcSetterGuard;
+    youtubeDrcSetterGuard = null;
+    if (!guard || guard.player.setDrcUserPreference !== guard.wrapper) return;
+    try {
+      guard.player.setDrcUserPreference = guard.original;
+    } catch {}
   }
 
-  function stopYouTubeNormalizationRestore() {
-    clearTimeout(youtubeNormalizationRestoreTimer);
-    youtubeNormalizationRestoreTimer = 0;
+  function callOriginalDrcSetter(player, value) {
+    const guard = youtubeDrcSetterGuard;
+    const setter =
+      guard && guard.player === player && player.setDrcUserPreference === guard.wrapper
+        ? guard.original
+        : player && player.setDrcUserPreference;
+    if (typeof setter !== 'function') return false;
+    setter.call(player, value);
+    youtubeNormalizationGeneration += 1;
+    return true;
   }
 
-  function scheduleYouTubeNormalizationRestore(delay = YOUTUBE_NORMALIZATION_GUARD_MS) {
-    if (
-      SETTINGS.normalizeLoudness ||
-      !youtubeDrcRestoreNeeded ||
-      youtubeNormalizationRestoreTimer
-    ) {
-      return;
+  /**
+   * YouTube не публикует событие изменения Stable Volume. Штатный переключатель
+   * вызывает метод активного плеера, поэтому на время нашей нормализации держим
+   * его обёрнутым: пользовательское включение запоминаем для восстановления,
+   * но в сам плеер немедленно передаём 0. Внутренние вызовы расширения идут
+   * через callOriginalDrcSetter() и не выглядят пользовательским намерением.
+   */
+  function guardYouTubeDrcSetter(player) {
+    if (!SETTINGS.normalizeLoudness) {
+      releaseYouTubeDrcSetterGuard();
+      return false;
     }
-    youtubeNormalizationRestoreTimer = setTimeout(() => {
-      youtubeNormalizationRestoreTimer = 0;
-      if (SETTINGS.normalizeLoudness || !youtubeDrcRestoreNeeded) return;
-      if (restoreYouTubeNormalization(getPlayer())) refreshLoudness();
-    }, delay);
+    if (
+      youtubeDrcSetterGuard &&
+      youtubeDrcSetterGuard.player === player &&
+      player &&
+      player.setDrcUserPreference === youtubeDrcSetterGuard.wrapper
+    ) {
+      return true;
+    }
+
+    releaseYouTubeDrcSetterGuard();
+    if (!player || typeof player.setDrcUserPreference !== 'function') return false;
+    const original = player.setDrcUserPreference;
+    const wrapper = function (value, ...rest) {
+      const requested = Number(value) === 1 ? 1 : 0;
+      if (!SETTINGS.normalizeLoudness) return original.call(this, value, ...rest);
+
+      rememberYouTubeDrcUserIntent(requested === 1);
+      const result = original.call(this, 0, ...rest);
+      youtubeNormalizationGeneration += 1;
+      youtubeNormalizationPending = false;
+      youtubeNormalizationForcedOff = true;
+      queueMediaLoudnessRefresh(true);
+      return result;
+    };
+    try {
+      player.setDrcUserPreference = wrapper;
+    } catch {
+      return false;
+    }
+    if (player.setDrcUserPreference !== wrapper) return false;
+    youtubeDrcSetterGuard = { player, original, wrapper };
+    return true;
   }
 
   /**
@@ -898,33 +937,27 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
    * выключенной, маркера нет и расширение не меняет его выбор.
    */
   function restoreYouTubeNormalization(player) {
-    stopYouTubeNormalizationGuard();
+    releaseYouTubeDrcSetterGuard();
     youtubeNormalizationForcedOff = false;
     youtubeNormalizationPending = false;
     if (!youtubeDrcRestoreNeeded) {
-      stopYouTubeNormalizationRestore();
       return true;
     }
 
     const hasSetter = !!(player && typeof player.setDrcUserPreference === 'function');
     youtubeNormalizationApiAvailable =
       hasSetter && typeof player.getDrcUserPreference === 'function';
-    if (!hasSetter) {
-      scheduleYouTubeNormalizationRestore();
-      return false;
-    }
+    if (!hasSetter) return false;
 
     try {
       // Это глобальное предпочтение YouTube. Сам плеер применит DRC только к
       // роликам, для которых такая дорожка действительно существует.
-      player.setDrcUserPreference(1);
+      callOriginalDrcSetter(player, 1);
       youtubeDrcRestoreNeeded = false;
       requestYouTubeDrcStateSync();
-      stopYouTubeNormalizationRestore();
       resetLoudness();
       return true;
     } catch {
-      scheduleYouTubeNormalizationRestore();
       return false;
     }
   }
@@ -934,19 +967,18 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
    *
    * Текущий плеер публикует setDrcUserPreference(0) — ровно тот же путь,
    * которым пользуется штатный переключатель. Вызов сохраняет предпочтение,
-   * выбирает исходную дорожку и перезагружает звук. Проверяем его постоянно:
-   * YouTube пересоздаёт плеер при SPA-переходах и может снова применить свою
-   * настройку уже после того, как расширение обработало первый кадр.
+   * выбирает исходную дорожку и перезагружает звук. Повторно сверяем состояние
+   * по событиям плеера и media; внешний вызов setter перехватывается сразу.
    */
   function disableYouTubeNormalization(player) {
     if (!SETTINGS.normalizeLoudness) {
       return restoreYouTubeNormalization(player);
     }
 
-    stopYouTubeNormalizationRestore();
     const hasGetter = !!(player && typeof player.getDrcUserPreference === 'function');
     const hasSetter = !!(player && typeof player.setDrcUserPreference === 'function');
     youtubeNormalizationApiAvailable = hasGetter && hasSetter;
+    guardYouTubeDrcSetter(player);
     const preference = hasGetter ? callPlayer(player, 'getDrcUserPreference') : undefined;
     const normalizedPreference = Number(preference);
 
@@ -954,8 +986,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       rememberYouTubeDrcWasDisabled();
       youtubeNormalizationPending = false;
       youtubeNormalizationForcedOff = true;
-      youtubeNormalizationRetryCount = 0;
-      scheduleYouTubeNormalizationGuard();
       return true;
     }
 
@@ -964,11 +994,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // подтверждением: он синхронно сохраняет 0 и запускает смену дорожки.
     if (!hasGetter && hasSetter) {
       try {
-        player.setDrcUserPreference(0);
+        callOriginalDrcSetter(player, 0);
         youtubeNormalizationPending = false;
         youtubeNormalizationForcedOff = true;
-        youtubeNormalizationRetryCount = 0;
-        scheduleYouTubeNormalizationGuard();
         return true;
       } catch {}
     }
@@ -981,15 +1009,15 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     if (preference !== undefined) resetLoudness();
     if (hasSetter) {
       try {
-        player.setDrcUserPreference(0);
+        callOriginalDrcSetter(player, 0);
+        const confirmed = Number(callPlayer(player, 'getDrcUserPreference')) === 0;
+        if (confirmed) {
+          youtubeNormalizationPending = false;
+          youtubeNormalizationForcedOff = true;
+          return true;
+        }
       } catch {}
     }
-    youtubeNormalizationRetryCount += 1;
-    scheduleYouTubeNormalizationGuard(
-      hasGetter && hasSetter && youtubeNormalizationRetryCount <= 10
-        ? YOUTUBE_NORMALIZATION_RETRY_MS
-        : YOUTUBE_NORMALIZATION_GUARD_MS
-    );
     return false;
   }
 
@@ -1181,7 +1209,62 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     setLoudnessBoost(1);
   }
 
+  function mediaObjectId(value) {
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return 0;
+    let id = mediaObjectIds.get(value);
+    if (!id) {
+      id = nextMediaObjectId++;
+      mediaObjectIds.set(value, id);
+    }
+    return id;
+  }
+
+  function mediaSourceId(video) {
+    if (!video) return 0;
+    const src = String(video.currentSrc || video.src || '');
+    const previous = mediaSourceIds.get(video);
+    if (previous && previous.src === src) return previous.id;
+    const next = { src, id: nextMediaSourceId++ };
+    mediaSourceIds.set(video, next);
+    return next.id;
+  }
+
+  /**
+   * В Shorts один плеер и один <video> переезжают между роликами, поэтому
+   * идентичности DOM-узлов недостаточно. В Watch YouTube тоже иногда повторно
+   * использует их, но video_id и currentSrc обновляются в другой момент.
+   * Поверхность входит в ключ намеренно: переход Shorts ↔ Watch всегда новая
+   * ревизия, даже если экспериментальная сборка сохранила оба узла.
+   */
+  function currentMediaRevision() {
+    const player = getPlayer();
+    const video = getVideo();
+    const data = callPlayer(player, 'getVideoData');
+    let id = data && typeof data === 'object' ? String(data.video_id || '') : '';
+    const shorts = location.pathname.startsWith('/shorts/');
+    if (!id && shorts) id = location.pathname.split('/')[2] || '';
+    if (!id && !shorts) {
+      try {
+        id = new URL(location.href).searchParams.get('v') || '';
+      } catch {}
+    }
+    return `${shorts ? 'shorts' : 'watch'}|p${mediaObjectId(player)}|v${mediaObjectId(
+      video
+    )}|${id}|s${mediaSourceId(video)}`;
+  }
+
+  function beginMediaRevision() {
+    const revision = currentMediaRevision();
+    if (revision !== observedMediaRevision) {
+      observedMediaRevision = revision;
+      completeMediaRevision = '';
+      resetLoudness();
+    }
+    return revision;
+  }
+
   function refreshLoudness() {
+    const revision = beginMediaRevision();
     const player = getPlayer();
     const youtubeNormalizationDisabled = disableYouTubeNormalization(player);
     const snap = readLoudness(player);
@@ -1200,16 +1283,48 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       !snap.complete ||
       (SETTINGS.normalizeLoudness && !youtubeNormalizationDisabled && snap.drc)
     ) {
-      return;
+      if (completeMediaRevision === revision) completeMediaRevision = '';
+      return false;
     }
+    completeMediaRevision = revision;
     // В ключ входит признак DRC для режима с выключенной нашей нормализацией
     // и сама настройка: при её переключении решение обязано пересчитаться.
     const key = `${snap.id}|${snap.drc ? 'drc' : 'raw'}|${
       SETTINGS.normalizeLoudness ? SETTINGS.maxBoostDb : 'off'
     }`;
-    if (key === loudnessKey) return;
+    if (key === loudnessKey) return true;
     loudnessKey = key;
     setLoudnessBoost(Math.pow(10, loudnessDbFor(snap) / 20));
+    return true;
+  }
+
+  /**
+   * Склеивает пачку emptied/durationchange/loadedmetadata/... в один проход.
+   * Таймер здесь не определяет корректность и не является опросом: новое
+   * событие уже произошло, мы лишь даём синхронной пачке событий закончиться.
+   */
+  function queueMediaLoudnessRefresh(force = false) {
+    mediaLoudnessRefreshForced = mediaLoudnessRefreshForced || force;
+    if (mediaLoudnessRefreshTimer) return;
+    mediaLoudnessRefreshTimer = setTimeout(() => {
+      mediaLoudnessRefreshTimer = 0;
+      const forced = mediaLoudnessRefreshForced;
+      mediaLoudnessRefreshForced = false;
+      const revision = beginMediaRevision();
+      const generation = youtubeNormalizationGeneration;
+      const ready = disableYouTubeNormalization(getPlayer());
+      const drcChanged = generation !== youtubeNormalizationGeneration;
+      if (
+        !forced &&
+        ready &&
+        !drcChanged &&
+        !youtubeNormalizationPending &&
+        completeMediaRevision === revision
+      ) {
+        return;
+      }
+      refreshLoudness();
+    }, 0);
   }
 
   /**
@@ -2649,7 +2764,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // Новый ролик — новый уровень: прежнее решение снимаем сразу, новое
     // появится, как только снимок станет согласованным.
     resetLoudness();
-    refreshLoudness();
+    queueMediaLoudnessRefresh(true);
     const current = Number(logicalOf(video));
     if (!validVolume(preferredVolume) && validVolume(current)) {
       rememberVolume(current);
@@ -2690,9 +2805,13 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     };
     // Решение о выравнивании обновляем по событиям самой дорожки, а не по
     // часам: именно к этим моментам плеер и досоздаёт то, чего не хватало
-    // снимку. Секундный тик остаётся страховкой.
+    // снимку. Синхронную пачку событий склеиваем в один пересчёт.
     const onMediaProgress = () => {
-      if (video === boundVideo) refreshLoudness();
+      if (video !== boundVideo) return;
+      // Старое усиление снимаем в обработчике самого события, до следующего
+      // кадра; дорогой снимок можно безопасно дочитать уже общей задачей.
+      beginMediaRevision();
+      queueMediaLoudnessRefresh();
     };
     videoBinding = {
       video,
@@ -3464,6 +3583,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   const prepareForNavigation = () => {
     // Переход — самый ранний сигнал смены ролика, раньше нового <video>.
     resetLoudness();
+    completeMediaRevision = '';
     if (!SETTINGS.useNativeSlider) {
       setEarlyNativeHidden(true);
     }
@@ -3472,10 +3592,22 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     setTimeout(() => {
       bindVideo();
       ensureUI();
+      queueMediaLoudnessRefresh();
     }, 0);
   on(document, 'yt-navigate-start', prepareForNavigation);
+  // Самый ранний надёжный сигнал нового video_id в Shorts. В Watch он тоже
+  // приходит раньше yt-navigate-finish, хотя оба режима переиспользуют <video>.
+  on(document, 'yt-player-updated', () => {
+    beginMediaRevision();
+    queueMediaLoudnessRefresh();
+  });
   on(document, 'yt-navigate-finish', refreshAfterNavigation);
   on(document, 'DOMContentLoaded', refreshAfterNavigation);
+  on(document, 'visibilitychange', () => {
+    if (!document.hidden) queueMediaLoudnessRefresh();
+  });
+  on(document, 'resume', () => queueMediaLoudnessRefresh());
+  on(window, 'pageshow', () => queueMediaLoudnessRefresh());
   on(document, 'fullscreenchange', () => setTimeout(layout, 0));
   on(window, 'resize', layout);
 
@@ -3506,8 +3638,8 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     clearTimeout(saveMutedTimer);
     clearTimeout(persistTimer);
     clearTimeout(earlyHideSafetyTimer);
-    clearTimeout(youtubeNormalizationGuardTimer);
-    clearTimeout(youtubeNormalizationRestoreTimer);
+    clearTimeout(mediaLoudnessRefreshTimer);
+    releaseYouTubeDrcSetterGuard();
     for (const off of teardown.splice(0)) {
       try {
         off();

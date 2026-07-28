@@ -82,7 +82,8 @@ function recordGains() {
 // не переживают сериализацию.
 function installPlayer(spec, tone) {
   window.__started = Date.now();
-  const player = document.getElementById('movie_player');
+  const player =
+    document.getElementById('movie_player') || document.querySelector('.html5-video-player');
   const expr = (code) => (code ? new Function('return (' + code + ')') : null);
   const drcWhen = expr(spec.drcWhen);
   const drcStateWhen = expr(spec.drcStateWhen);
@@ -109,7 +110,9 @@ function installPlayer(spec, tone) {
   // <video> для следующего ролика, и тест это воспроизводит.
   player.getVideoData = () => ({ video_id: window.__id != null ? window.__id : spec.id });
   player.getPlayerResponse = () => ({
-    videoDetails: { videoId: spec.responseId || spec.id },
+    videoDetails: {
+      videoId: spec.responseId || (window.__id != null ? window.__id : spec.id),
+    },
     playerConfig: {
       audioConfig: { loudnessDb: spec.db, enablePerFormatLoudness: true },
     },
@@ -127,7 +130,9 @@ function installPlayer(spec, tone) {
   // Предпочтение «стабильной громкости»: 1 — включена, 0 — выключена. Именно
   // оно меняется при ручном переключении, тогда как getDrcState() залипает.
   if (!spec.noPreference) {
+    window.__drcPreferenceReads = 0;
     player.getDrcUserPreference = () => {
+      window.__drcPreferenceReads += 1;
       if (window.__pref !== undefined) return Number(window.__pref) === 1 ? 1 : 0;
       if (preferenceWhen) return preferenceWhen() ? 1 : 0;
       return spec.preference != null ? spec.preference : 1;
@@ -141,7 +146,9 @@ function installPlayer(spec, tone) {
       window.__pref = preference;
     };
   }
+  window.__statsReads = 0;
   player.getStatsForNerds = () => {
+    window.__statsReads += 1;
     if (spec.drcNow === true || (drcWhen && drcWhen())) {
       return { volume: '100% / 100% (DRC (cont.-14.0 dB / tgt.-14.0 dB))' };
     }
@@ -172,11 +179,12 @@ run('loudness: компенсация тихих роликов', async ({ brows
   // Поднимает страницу с макетом плеера и запущенным тоном.
   async function play(
     spec,
-    { normalize = true, maxBoostDb, state, withBridge = false } = {}
+    { normalize = true, maxBoostDb, state, withBridge = false, page: kind = 'watch' } = {}
   ) {
     const settings = { normalizeLoudness: normalize };
     if (maxBoostDb !== undefined) settings.maxBoostDb = maxBoostDb;
     const page = await openPage(browser, {
+      page: kind,
       withMain: settings,
       withBridge,
       state,
@@ -203,14 +211,16 @@ run('loudness: компенсация тихих роликов', async ({ brows
     page.evaluate(() => ({
       gains: window.__gains.slice(),
       drcPreferenceCalls: window.__drcPreferenceCalls.slice(),
+      drcPreferenceReads: window.__drcPreferenceReads,
+      statsReads: window.__statsReads,
       report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
     }));
 
   // Возвращает последнее усиление, доехавшее до GainNode.
   async function measure(spec, options) {
     const page = await play(spec, options);
-    // Решение больше не ждёт окна определения дорожки: снимок согласован уже
-    // на старте, и хватает одного секундного тика с запасом.
+    // Даём настоящему media-элементу запуститься и завершить очередь событий.
+    // Корректность расширения от этой паузы не зависит: пересчёт событийный.
     await page.waitForTimeout(1200);
     const { gains, report, drcPreferenceCalls } = await readAll(page);
     await page.close();
@@ -501,9 +511,9 @@ run('loudness: компенсация тихих роликов', async ({ brows
   );
 
   // При включённой нашей нормализации Stable Volume должна быть выключена
-  // независимо от сохранённого предпочтения YouTube. Сторож продолжает
-  // проверять его после запуска: если YouTube включит DRC обратно без media-
-  // событий, расширение заметит это само.
+  // независимо от сохранённого предпочтения YouTube. Постоянного секундного
+  // опроса больше нет: пользовательский вызов setter перехватывается сразу,
+  // а переходы плеера перепроверяются по событиям.
   {
     const page = await play({
       id: 'preference',
@@ -524,15 +534,29 @@ run('loudness: компенсация тихих роликов', async ({ brows
       JSON.stringify(initial)
     );
 
-    await page.evaluate(() => {
-      window.__pref = 1;
-    });
+    const readsBeforeIdle = await page.evaluate(() => window.__drcPreferenceReads);
     await page.waitForTimeout(1200);
-    const restored = await readAll(page);
+    const readsAfterIdle = await page.evaluate(() => window.__drcPreferenceReads);
+    check(
+      'после подтверждения DRC нет постоянного секундного опроса',
+      readsAfterIdle === readsBeforeIdle,
+      `${readsBeforeIdle} → ${readsAfterIdle} чтений`
+    );
+
+    const restored = await page.evaluate(() => {
+      document.getElementById('movie_player').setDrcUserPreference(1);
+      return {
+        calls: window.__drcPreferenceCalls.slice(),
+        preference: window.__pref,
+        report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
+      };
+    });
     await page.close();
     check(
-      'сторож повторно выключает Stable Volume без media-событий',
-      restored.drcPreferenceCalls.filter((value) => value === 0).length >= 2 &&
+      'пользовательское включение Stable Volume сразу отменяется и запоминается',
+      restored.calls.filter((value) => value === 0).length >= 2 &&
+        restored.preference === 0 &&
+        restored.report.youtubeDrcRestoreNeeded === true &&
         restored.report.preference === 0 &&
         restored.report.drc === false &&
         Math.abs(restored.report.boostDb - 6) < 0.01,
@@ -736,6 +760,48 @@ run('loudness: компенсация тихих роликов', async ({ brows
       'смена ролика на том же <video> снимает усиление сразу',
       after.boostDb === 0 && after.complete === false,
       JSON.stringify(after)
+    );
+  }
+
+  // Watch и Shorts имеют разные последовательности перехода, но оба могут
+  // переиспользовать один <video>. Проверяем каждую поверхность отдельно:
+  // yt-player-updated должен снять старое решение сразу, а пачка media-событий
+  // обязана дать один склеенный тяжёлый пересчёт.
+  for (const kind of ['watch', 'shorts']) {
+    const page = await play(
+      { id: `${kind}-first`, db: -6, preference: 0, drcState: 1 },
+      { page: kind }
+    );
+    const transition = await page.evaluate(async (surface) => {
+      window.__statsReads = 0;
+      window.__id = `${surface}-second`;
+      document.dispatchEvent(new Event('yt-player-updated'));
+      const video = document.querySelector('video');
+      for (const type of [
+        'emptied',
+        'durationchange',
+        'loadedmetadata',
+        'loadeddata',
+        'canplay',
+        'playing',
+      ]) {
+        video.dispatchEvent(new Event(type));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const statsReads = window.__statsReads;
+      return {
+        statsReads,
+        report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
+      };
+    }, kind);
+    await page.close();
+    check(
+      `${kind}: переход на том же <video> склеивает пачку событий`,
+      transition.statsReads >= 1 &&
+        transition.statsReads <= 2 &&
+        transition.report.complete === true &&
+        Math.abs(transition.report.boostDb - 6) < 0.01,
+      JSON.stringify(transition)
     );
   }
 
