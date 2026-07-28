@@ -51,15 +51,18 @@ run('generation: передача управления между поколен
 
   const updates = await page.evaluate(
     ([oldSecret, newSecret, settings]) => {
-      const api = window[Symbol.for('ytev.main.instance.v2')];
+      const broker = window[Symbol.for('ytev.preload.instance.v1')];
+      const diagnostic = window[Symbol.for('ytev.main.instance.v2')];
       return {
-        withOld: api.update(oldSecret, { settings }),
-        withNew: api.update(newSecret, { settings }),
+        publicUpdate: typeof diagnostic.update,
+        withOld: broker.invokeControl(oldSecret, 'update', { settings }),
+        withNew: broker.invokeControl(newSecret, 'update', { settings }),
       };
     },
     [A.secret, B.secret, { ...TEST_SETTINGS, sliderScale: 45 }]
   );
-  check('старый секрет отклонён', updates.withOld === false);
+  check('публичный слот не управляет расширением', updates.publicUpdate === 'undefined');
+  check('старый секрет отклонён', updates.withOld === null);
   check('новый секрет принят', updates.withNew === true);
   await page.waitForTimeout(500);
   const width = await page.evaluate(

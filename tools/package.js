@@ -48,7 +48,15 @@ const zipName = `youtube-exponential-volume-${manifest.version}.zip`;
 const zipPath = path.join(OUT_DIR, zipName);
 fs.rmSync(zipPath, { force: true });
 
-execFileSync('zip', ['-r', '-q', '-X', zipPath, ...INCLUDE], { cwd: ROOT });
+try {
+  execFileSync('zip', ['-r', '-q', '-X', zipPath, ...INCLUDE], { cwd: ROOT });
+} catch (error) {
+  // В Windows утилита zip обычно отсутствует, зато системный bsdtar умеет
+  // выбирать ZIP по расширению через -a. Ошибки самого zip не маскируем:
+  // fallback нужен только когда исполняемый файл действительно не найден.
+  if (process.platform !== 'win32' || error.code !== 'ENOENT') throw error;
+  execFileSync('tar.exe', ['-a', '-c', '-f', zipPath, ...INCLUDE], { cwd: ROOT });
+}
 
 const size = (fs.statSync(zipPath).size / 1024).toFixed(1);
 console.log(`собрано: dist/${zipName} (${size} КБ)`);

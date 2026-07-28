@@ -15,30 +15,25 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     return false;
   }
   const INSTANCE_KEY = Symbol.for('ytev.main.instance.v2');
-  // Смена поколений. Ключ глобального реестра символов угадывается тривиально,
-  // поэтому «занят — значит уходим» означало бы, что страница выключает
-  // расширение одной строкой. Опознаём именно свой экземпляр и различаем два
-  // случая: тот же документ (bridge жив, канал совпадает — второй раз
-  // разворачиваться не нужно) и старое поколение после перезагрузки
-  // расширения (канал другой: секрет и канал прошлого bridge уже мертвы, и
-  // без передачи управления настройки из popup до страницы не доходили).
-  // Гасим предшественника ДО захвата дескрипторов ниже: его dispose()
-  // возвращает нативные volume/muted, и порядок наоборот стёр бы наш патч.
-  const previous = window[INSTANCE_KEY];
-  const isOurs =
-    previous &&
-    typeof previous === 'object' &&
-    previous.version === 2 &&
-    typeof previous.dispose === 'function' &&
-    typeof previous.channel === 'string';
-  if (isOurs && previous.channel === CHANNEL_ID) return false;
-  if (isOurs) {
-    try {
-      previous.dispose();
-    } catch {}
+  // preload.js уже стоит в MAIN-мире с document_start. Помимо раннего уровня
+  // он держит неизменяемый брокер управления: секрет проверяется внутри его
+  // замыкания и больше не передаётся функции из writable-свойства window.
+  // beginControl() также гасит предыдущее поколение ДО захвата дескрипторов:
+  // его dispose() возвращает нативные volume/muted.
+  const preload = window[Symbol.for('ytev.preload.instance.v1')];
+  if (
+    !preload ||
+    preload.version !== 1 ||
+    typeof preload.takeover !== 'function' ||
+    typeof preload.beginControl !== 'function' ||
+    typeof preload.commitControl !== 'function' ||
+    typeof preload.cancelControl !== 'function'
+  ) {
+    return false;
   }
+  if (!preload.beginControl(CHANNEL_ID, updateSecret)) return false;
 
-  // preload.js уже стоит в MAIN-мире с document_start и удерживает
+  // preload.js удерживает
   // сохранённый уровень, пока service worker читает chrome.storage.
   // Снимаем его синхронный перехват до захвата нативных дескрипторов:
   // дальше полный экземпляр отвечает и за кривую, и за состояние.
@@ -46,7 +41,6 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // поля и только в допустимом виде — ни одно постороннее свойство внутрь
   // не проходит. Сам слот реестра preload занимает первым делом, ещё до
   // своих ранних выходов, так что чужому объекту там взяться неоткуда.
-  const preload = window[Symbol.for('ytev.preload.instance.v1')];
   let preloadState = null;
   if (
     preload &&
@@ -59,12 +53,14 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       if (
         state &&
         typeof state === 'object' &&
-        state.volumeDirty === true &&
         Number.isFinite(heldVolume) &&
         heldVolume >= 0 &&
         heldVolume <= 1
       ) {
-        preloadState = { volume: heldVolume, volumeDirty: true };
+        preloadState = {
+          volume: heldVolume,
+          volumeDirty: state.volumeDirty === true,
+        };
       }
     } catch {}
   }
@@ -182,6 +178,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     typeof nativeMutedDesc.get !== 'function' ||
     typeof nativeMutedDesc.set !== 'function'
   ) {
+    preload.cancelControl(updateSecret);
     return false;
   }
   const logicalVolume = new WeakMap();
@@ -309,34 +306,18 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
           muted: typeof preferredMuted === 'boolean' ? preferredMuted : null,
           enabled: SETTINGS.enabled,
           gamma: SETTINGS.gamma,
-          useNativeSlider: SETTINGS.useNativeSlider,
         })
       );
     } catch {}
   }
 
-  // Синхронный кэш нужен только для самого первого кадра новой страницы.
-  // chrome.storage остаётся источником истины и перезапишет кэш, когда
-  // bridge пришлёт актуальное состояние.
-  try {
-    const cached = JSON.parse(localStorage.getItem(STATE_CACHE_KEY) || 'null');
-    const cachedVolume = Number(cached && cached.volume);
-    if (cached && cached.volume != null && validVolume(cachedVolume)) {
-      preferredVolume = cachedVolume;
-      rememberAudible(cachedVolume);
-    }
-    if (cached && typeof cached.muted === 'boolean') {
-      preferredMuted = cached.muted;
-    }
-  } catch {}
+  // main.js не читает page-writable localStorage повторно: он получает от
+  // preload только уже проверенный и ограниченный ранний уровень, после чего
+  // chrome.storage из initialPayload остаётся источником истины.
   const preloadVolume = Number(preloadState && preloadState.volume);
-  if (
-    preloadState &&
-    preloadState.volumeDirty === true &&
-    validVolume(preloadVolume)
-  ) {
+  if (preloadState && validVolume(preloadVolume)) {
     preferredVolume = preloadVolume;
-    preferredVolumeDirty = true;
+    preferredVolumeDirty = preloadState.volumeDirty === true;
     rememberAudible(preloadVolume);
   }
 
@@ -1121,6 +1102,103 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   }
 
   /**
+   * `getAudioTrack()` возвращает выбранную дорожку, но её форма частично
+   * минифицирована YouTube. Не привязываемся к промежуточным именам полей:
+   * ограниченно обходим объект и ищем только `id`, который действительно
+   * присутствует среди audioTrack.id текущего ответа плеера. Заодно извлекаем
+   * itag из непрозрачного верхнего id вида `251;...`, если YouTube его отдал.
+   */
+  function activeAudioTrack(player, formats) {
+    const trackIds = new Set();
+    const itags = new Set();
+    for (const format of formats) {
+      const track = format && format.audioTrack;
+      if (track && track.id != null) trackIds.add(String(track.id));
+      const itag = Number(format && format.itag);
+      if (Number.isInteger(itag) && itag > 0) itags.add(itag);
+    }
+    if (!trackIds.size) return { id: '', itag: null, count: 0 };
+
+    const selected = callPlayer(player, 'getAudioTrack');
+    const matchedIds = new Set();
+    const matchedItags = new Set();
+    if (selected && (typeof selected === 'object' || typeof selected === 'function')) {
+      const seen = new Set();
+      const pending = [{ value: selected, depth: 0 }];
+      let inspected = 0;
+      while (pending.length && inspected < 64) {
+        const item = pending.pop();
+        const value = item.value;
+        if (
+          !value ||
+          (typeof value !== 'object' && typeof value !== 'function') ||
+          seen.has(value)
+        ) {
+          continue;
+        }
+        seen.add(value);
+        inspected += 1;
+        const names = Object.getOwnPropertyNames(value).slice(0, 64);
+        for (const name of names) {
+          let child;
+          try {
+            child = value[name];
+          } catch {
+            continue;
+          }
+          if (name === 'id' && typeof child === 'string') {
+            if (trackIds.has(child)) matchedIds.add(child);
+            const itagMatch = /^(\d+);/.exec(child);
+            const itag = itagMatch ? Number(itagMatch[1]) : NaN;
+            if (Number.isInteger(itag) && itags.has(itag)) matchedItags.add(itag);
+          }
+          if (
+            item.depth < 4 &&
+            child &&
+            (typeof child === 'object' || typeof child === 'function')
+          ) {
+            pending.push({ value: child, depth: item.depth + 1 });
+          }
+        }
+      }
+    }
+
+    return {
+      id:
+        matchedIds.size === 1
+          ? matchedIds.values().next().value
+          : trackIds.size === 1
+            ? trackIds.values().next().value
+            : '',
+      itag: matchedItags.size === 1 ? matchedItags.values().next().value : null,
+      count: trackIds.size,
+    };
+  }
+
+  function activeTrackLoudness(formats, track) {
+    if (!track.id) return NaN;
+    const values = [];
+    for (const format of formats) {
+      const audioTrack = format && format.audioTrack;
+      if (!audioTrack || String(audioTrack.id || '') !== track.id) continue;
+      if (track.itag != null && Number(format.itag) !== track.itag) continue;
+      // DRC и Voice Boost — отдельные обработанные варианты той же дорожки.
+      // При нашей нормализации нужен уровень исходного аудио.
+      if (format.isDrc === true || format.isVb === true) continue;
+      const value =
+        format.loudnessDb == null || format.loudnessDb === ''
+          ? NaN
+          : Number(format.loudnessDb);
+      if (Number.isFinite(value)) values.push(value);
+    }
+    if (!values.length) return NaN;
+    // Разные кодеки отличаются на сотые дБ. Существенно разные значения
+    // означают, что YouTube добавил ещё один неизвестный вариант: не угадываем.
+    if (Math.max(...values) - Math.min(...values) >= 0.15) return NaN;
+    return values.reduce((sum, value) => sum + value, 0) / values.length;
+  }
+
+  /**
    * Полное решение из одного снимка состояния плеера.
    * `complete: false` — «пока неизвестно»; в этом состоянии усиление не
    * поднимается никогда, поэтому худший исход на медленной машине — «тише,
@@ -1142,6 +1220,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       stats,
       state,
       preference,
+      trackId: '',
+      trackItag: null,
+      dbSource: '',
     };
     if (!player || typeof player.getPlayerResponse !== 'function') return unknown;
     // Ответ плеера — объект страницы: и вызов, и последующее чтение свойств
@@ -1168,15 +1249,37 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     if (!videoId) return unknown;
     unknown.id = videoId;
 
+    const formats =
+      response.streamingData && Array.isArray(response.streamingData.adaptiveFormats)
+        ? response.streamingData.adaptiveFormats
+        : [];
+    const track = activeAudioTrack(player, formats);
+    const trackDb = activeTrackLoudness(formats, track);
     const config = response.playerConfig && response.playerConfig.audioConfig;
     const raw = config ? config.loudnessDb : undefined;
-    const db = raw == null || raw === '' ? NaN : Number(raw);
+    const configDb = raw == null || raw === '' ? NaN : Number(raw);
+    // В многоязычном ответе общее audioConfig.loudnessDb может относиться к
+    // оригиналу, хотя фактически играет перевод. Если выбранную дорожку пока
+    // нельзя сопоставить, безопаснее дождаться следующего события, чем
+    // применить уровень другого языка.
+    const db = Number.isFinite(trackDb)
+      ? trackDb
+      : track.count > 1
+        ? NaN
+        : configDb;
     const known = {
       id: videoId,
       db: Number.isFinite(db) ? db : null,
       stats,
       state,
       preference,
+      trackId: track.id,
+      trackItag: track.itag,
+      dbSource: Number.isFinite(trackDb)
+        ? 'audioTrack'
+        : Number.isFinite(configDb) && track.count <= 1
+          ? 'audioConfig'
+          : '',
     };
     // Прочитанный уровень показываем и в неполном снимке: без него
     // диагностика не отличит «уровня ещё нет» от «нечем подтвердить».
@@ -1289,7 +1392,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     completeMediaRevision = revision;
     // В ключ входит признак DRC для режима с выключенной нашей нормализацией
     // и сама настройка: при её переключении решение обязано пересчитаться.
-    const key = `${snap.id}|${snap.drc ? 'drc' : 'raw'}|${
+    const key = `${snap.id}|${snap.trackId || 'default'}|${
+      snap.trackItag == null ? 'any' : snap.trackItag
+    }|${snap.drc ? 'drc' : 'raw'}|${Number.isFinite(snap.db) ? snap.db.toFixed(3) : 'none'}|${
       SETTINGS.normalizeLoudness ? SETTINGS.maxBoostDb : 'off'
     }`;
     if (key === loudnessKey) return true;
@@ -1678,54 +1783,58 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     return true;
   }
 
+  // Что расширение решило про громкость текущего ролика. Диагностика
+  // намеренно публична: уровень ролика уже известен самой странице.
+  function loudnessReport() {
+    const snap = readLoudness(getPlayer());
+    return {
+      enabled: SETTINGS.normalizeLoudness,
+      db: snap.db,
+      drc: snap.drc,
+      // complete — определилось ли состояние; source — кто дал ответ.
+      // Вместе со stats и сырыми state/preference этого хватает, чтобы
+      // разобрать любой спорный случай прямо из консоли.
+      complete: snap.complete,
+      source: snap.source,
+      stats: snap.stats,
+      state: snap.state,
+      preference: snap.preference,
+      trackId: snap.trackId,
+      trackItag: snap.trackItag,
+      dbSource: snap.dbSource,
+      youtubeNormalizationDisabled:
+        !SETTINGS.normalizeLoudness || youtubeNormalizationForcedOff,
+      youtubeNormalizationPending,
+      youtubeNormalizationApiAvailable,
+      youtubeDrcRestoreNeeded,
+      youtubeDrcRestoreStateTracked,
+      youtubeNormalizationRestorePending:
+        !SETTINGS.normalizeLoudness && youtubeDrcRestoreNeeded,
+      boost: loudnessBoost,
+      boostDb: Number((20 * Math.log10(loudnessBoost)).toFixed(2)),
+      maxBoostDb: SETTINGS.maxBoostDb,
+    };
+  }
+
+  // Этот объект никогда не публикуется в window. Секрет проверяет
+  // неизменяемый preload-брокер, а сюда доходит уже авторизованный вызов.
+  const controlApi = Object.freeze({
+    dispose: disposeInstance,
+    update(payload) {
+      return applyTrustedPayload(payload, false);
+    },
+    drcRestoreState() {
+      return youtubeDrcRestoreNeeded;
+    },
+  });
+
   const instanceApi = Object.freeze({
     version: 2,
     // Канал — опознавательный знак поколения, не секрет: он и так виден
-    // странице, потому что main.js сам публикует его в postMessage.
-    // Совпал — значит это тот же bridge и разворачиваться второй раз не
-    // нужно; не совпал — расширение перезагрузили, и мы уступаем место.
+    // странице в postMessage. В window остаётся только безопасная
+    // диагностика, без update(), dispose() и чтения внутреннего DRC-флага.
     channel: CHANNEL_ID,
-    dispose: disposeInstance,
-    // Что расширение решило про громкость текущего ролика. Нужно, чтобы
-    // сверить наш вывод с числом, которое YouTube показывает в «Статистике
-    // для сисадминов»: там то же значение подписано как content loudness.
-    // Ничего закрытого не отдаёт — уровень ролика странице и так известен.
-    loudness() {
-      const snap = readLoudness(getPlayer());
-      return {
-        enabled: SETTINGS.normalizeLoudness,
-        db: snap.db,
-        drc: snap.drc,
-        // complete — определилось ли состояние; source — кто дал ответ.
-        // Вместе со stats и сырыми state/preference этого хватает, чтобы
-        // разобрать любой спорный случай прямо из консоли, не добавляя
-        // отладочных крючков.
-        complete: snap.complete,
-        source: snap.source,
-        stats: snap.stats,
-        state: snap.state,
-        preference: snap.preference,
-        youtubeNormalizationDisabled:
-          !SETTINGS.normalizeLoudness || youtubeNormalizationForcedOff,
-        youtubeNormalizationPending,
-        youtubeNormalizationApiAvailable,
-        youtubeDrcRestoreNeeded,
-        youtubeDrcRestoreStateTracked,
-        youtubeNormalizationRestorePending:
-          !SETTINGS.normalizeLoudness && youtubeDrcRestoreNeeded,
-        boost: loudnessBoost,
-        boostDb: Number((20 * Math.log10(loudnessBoost)).toFixed(2)),
-        maxBoostDb: SETTINGS.maxBoostDb,
-      };
-    },
-    update(candidateSecret, payload) {
-      if (candidateSecret !== updateSecret) return false;
-      return applyTrustedPayload(payload, false);
-    },
-    drcRestoreState(candidateSecret) {
-      if (candidateSecret !== updateSecret) return null;
-      return youtubeDrcRestoreNeeded;
-    },
+    loudness: loudnessReport,
   });
 
   /* ------------------------------------------------------------------ *
@@ -2811,7 +2920,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       // Старое усиление снимаем в обработчике самого события, до следующего
       // кадра; дорогой снимок можно безопасно дочитать уже общей задачей.
       beginMediaRevision();
-      queueMediaLoudnessRefresh();
+      // video_id и currentSrc при смене языковой дорожки остаются прежними,
+      // поэтому обычная проверка завершённой ревизии пропустила бы событие.
+      // События редкие и синхронная пачка всё равно склеивается таймером.
+      queueMediaLoudnessRefresh(true);
     };
     videoBinding = {
       video,
@@ -3611,16 +3723,20 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   on(document, 'fullscreenchange', () => setTimeout(layout, 0));
   on(window, 'resize', layout);
 
-  // Регистрация перезаписываемая: иначе следующее поколение (перезагрузка
-  // расширения) не смогло бы встать на место мёртвого экземпляра, а
-  // страница, заранее занявшая ключ, выключала бы расширение навсегда.
-  // Провал defineProperty (ключ занят неперезаписываемым чужим значением)
-  // не фатален: без регистрации теряется только живое обновление настроек.
+  if (!preload.commitControl(updateSecret, controlApi)) {
+    disposeInstance();
+    preload.cancelControl(updateSecret);
+    return false;
+  }
+
+  // Публичный слот нужен только для диагностики из консоли. Управляющих
+  // методов и секрета в нём нет; service worker обращается исключительно к
+  // неизменяемому preload-брокеру.
   try {
     Object.defineProperty(window, INSTANCE_KEY, {
       configurable: true,
       enumerable: false,
-      writable: true,
+      writable: false,
       value: instanceApi,
     });
   } catch {}

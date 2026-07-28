@@ -63,6 +63,39 @@ async function run() {
 
   const channel = '0123456789abcdef0123456789abcdef';
   const secret = '0123456789abcdef'.repeat(4);
+  let publicSlotCalled = false;
+  const brokerCalls = [];
+  context.window = {
+    [Symbol.for('ytev.main.instance.v2')]: {
+      version: 2,
+      update() {
+        publicSlotCalled = true;
+        return true;
+      },
+      drcRestoreState() {
+        publicSlotCalled = true;
+        return false;
+      },
+    },
+    [Symbol.for('ytev.preload.instance.v1')]: Object.freeze({
+      version: 1,
+      invokeControl(candidateSecret, operation, payload) {
+        brokerCalls.push({ candidateSecret, operation, payload });
+        return operation === 'update' ? true : true;
+      },
+    }),
+  };
+  assert.equal(
+    context.updateYouTubeVolumeMain(secret, { settings: { gamma: 2 } }),
+    true
+  );
+  assert.equal(context.readYouTubeVolumeDrcRestoreState(secret), true);
+  assert.equal(publicSlotCalled, false, 'a replaced public MAIN slot must never receive the secret');
+  assert.deepEqual(
+    brokerCalls.map((call) => call.operation),
+    ['update', 'drcRestoreState']
+  );
+
   const sender = {
     frameId: 0,
     tab: { id: 17 },
