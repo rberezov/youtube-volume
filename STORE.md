@@ -38,10 +38,9 @@
 • Автосворачивание: без курсора остаётся аккуратная круглая кнопка. Шкала
   выезжает и убирается плавно, проценты появляются следом за ней. Есть режим
   с задержкой перед сворачиванием — удобно с длинной шкалой.
-• Выравнивание громкости роликов, по желанию: тихие подтягиваются к общему
-  уровню. Предел подъёма выбирается — от 1 до 10 дБ, по умолчанию 6.
-  Пригодится, когда «стабильная громкость» YouTube выключена или недоступна;
-  по умолчанию выключено.
+• Выравнивание громкости роликов, по желанию: расширение отключает
+  «стабильную громкость» YouTube и само выравнивает исходный звук. Предел
+  подъёма выбирается — от 1 до 15 дБ, по умолчанию 6. По умолчанию выключено.
 • Режим «использовать шкалу YouTube»: свой ползунок не строится, а
   экспоненциальная кривая продолжает работать.
 • Если в панели не хватает места, ползунок укорачивается, затем прячутся
@@ -91,10 +90,9 @@ WHAT ELSE
 • Auto-collapse: with the pointer away only a neat round button remains. The
   slider slides out and back smoothly, with the percentage following it. A
   collapse delay mode is available — handy with a long slider.
-• Optional loudness matching across videos: quiet ones are brought up towards
-  a common level, with a boost limit you choose — 1 to 10 dB, 6 by default.
-  Useful when YouTube's own stable volume is off or unavailable; disabled by
-  default.
+• Optional loudness matching across videos: the extension disables YouTube
+  Stable Volume and normalizes the original audio itself. Choose a boost limit
+  from 1 to 15 dB; the default is 6 dB. Disabled by default.
 • "Use the YouTube slider" mode: no custom slider is built, while the
   exponential curve keeps working.
 • When the control bar runs out of room the slider shrinks, then the

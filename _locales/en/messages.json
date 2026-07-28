@@ -82,7 +82,7 @@
     "message": "Normalize video loudness"
   },
   "normalizeDescription": {
-    "message": "Bring quiet videos up to a common level"
+    "message": "Replace YouTube Stable Volume with extension normalization"
   },
   "maxBoostTitle": {
     "message": "Boost limit",

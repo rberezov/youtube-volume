@@ -4,12 +4,11 @@
 // насколько ролик громче своей цели. Громкие он глушит сам, тихие оставляет
 // как есть, и расширение добирает недостающее усилителем Web Audio.
 //
-// Выбранную дорожку знает сам плеер: getDrcState() возвращает 0 при активном
-// DRC и 1 без него. Из streamingData её вычислить нельзя — там лежат все
-// доступные варианты (на ролике с DRC под itag 251 их сразу три), а не
-// текущий выбор. Поэтому макет плеера здесь полнее, чем «один loudnessDb»:
-// у него есть getDrcState, videoDetails, три варианта формата и
-// правдоподобная строка громкости.
+// Когда наша нормализация включена, расширение сначала вызывает
+// setDrcUserPreference(0), чтобы YouTube выбрал исходную дорожку. Состояние
+// всё равно проверяется: getDrcState() возвращает 0 при активном DRC и 1 без
+// него. Из streamingData текущий выбор вычислить нельзя — там лежат все
+// доступные варианты (на ролике с DRC под itag 251 их сразу три).
 //
 // Наблюдать компенсацию снаружи можно только по фактическому усилению в
 // графе, поэтому тест подменяет AudioContext и записывает всё, что уходит в
@@ -78,7 +77,7 @@ function recordGains() {
 // Макет плеера в той форме, в какой данные приходят от настоящего YouTube.
 // spec: { id, db, offersDrc, drcState, drcStateWhen, preference, preferenceWhen,
 //         noPreference, drcNow, drcWhen, statsDb, statsSilent, responseId,
-//         noDrcState }
+//         noDrcState, noDrcSetter }
 // *When — выражения строкой: спек уезжает в страницу как JSON, функции в нём
 // не переживают сериализацию.
 function installPlayer(spec, tone) {
@@ -129,8 +128,17 @@ function installPlayer(spec, tone) {
   // оно меняется при ручном переключении, тогда как getDrcState() залипает.
   if (!spec.noPreference) {
     player.getDrcUserPreference = () => {
+      if (window.__pref !== undefined) return Number(window.__pref) === 1 ? 1 : 0;
       if (preferenceWhen) return preferenceWhen() ? 1 : 0;
       return spec.preference != null ? spec.preference : 1;
+    };
+  }
+  window.__drcPreferenceCalls = [];
+  if (!spec.noDrcSetter) {
+    player.setDrcUserPreference = (value) => {
+      const preference = Number(value) === 1 ? 1 : 0;
+      window.__drcPreferenceCalls.push(preference);
+      window.__pref = preference;
     };
   }
   player.getStatsForNerds = () => {
@@ -185,6 +193,7 @@ run('loudness: компенсация тихих роликов', async ({ brows
   const readAll = (page) =>
     page.evaluate(() => ({
       gains: window.__gains.slice(),
+      drcPreferenceCalls: window.__drcPreferenceCalls.slice(),
       report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
     }));
 
@@ -194,9 +203,14 @@ run('loudness: компенсация тихих роликов', async ({ brows
     // Решение больше не ждёт окна определения дорожки: снимок согласован уже
     // на старте, и хватает одного секундного тика с запасом.
     await page.waitForTimeout(1200);
-    const { gains, report } = await readAll(page);
+    const { gains, report, drcPreferenceCalls } = await readAll(page);
     await page.close();
-    return { last: gains.length ? gains[gains.length - 1] : null, gains, report };
+    return {
+      last: gains.length ? gains[gains.length - 1] : null,
+      gains,
+      report,
+      drcPreferenceCalls,
+    };
   }
 
   const quiet = await measure({ id: 'quiet', db: -6 });
@@ -245,8 +259,8 @@ run('loudness: компенсация тихих роликов', async ({ brows
     `${loudOff.last} против ожидаемого ${BASE_GAIN * boostOf(-4)}`
   );
 
-  // На DRC-дорожке приглушать нечего: она уже сведена к цели, а loudnessDb в
-  // ответе остался от исходной дорожки.
+  // При нашей нормализации DRC сначала выключается, затем к исходной дорожке
+  // применяется наше приглушение.
   const loudDrc = await measure({
     id: 'louddrc',
     db: 4,
@@ -254,9 +268,11 @@ run('loudness: компенсация тихих роликов', async ({ brows
     drcNow: true,
   });
   check(
-    'на активной DRC-дорожке громкий ролик не приглушается',
-    loudDrc.last !== null && Math.abs(loudDrc.last - BASE_GAIN) < 1e-6,
-    `${loudDrc.last} против ожидаемого ${BASE_GAIN}`
+    'YouTube DRC выключен, громкий ролик приглушён расширением',
+    loudDrc.last !== null &&
+      Math.abs(loudDrc.last - BASE_GAIN * boostOf(-4)) < 1e-6 &&
+      loudDrc.drcPreferenceCalls.includes(0),
+    `${loudDrc.last} против ожидаемого ${BASE_GAIN * boostOf(-4)}`
   );
 
   const veryQuiet = await measure({ id: 'very', db: -20 });
@@ -268,7 +284,7 @@ run('loudness: компенсация тихих роликов', async ({ brows
 
   // Потолок — настройка «Предел подъёма». Шесть децибел остаются значением по
   // умолчанию, но выбирает его пользователь.
-  for (const cap of [1, 3, 10]) {
+  for (const cap of [1, 3, 10, 15]) {
     const capped = await measure({ id: 'cap' + cap, db: -20 }, { maxBoostDb: cap });
     check(
       `предел подъёма ${cap}дБ соблюдается`,
@@ -286,9 +302,9 @@ run('loudness: компенсация тихих роликов', async ({ brows
   // расширение, ручная правка, старая версия настроек.
   const wild = await measure({ id: 'wild', db: -20 }, { maxBoostDb: 99 });
   check(
-    'значение вне диапазона подрезается до 10дБ',
-    wild.last !== null && Math.abs(wild.last - BASE_GAIN * boostOf(10)) < 1e-6,
-    `${wild.last} против ${BASE_GAIN * boostOf(10)}`
+    'значение вне диапазона подрезается до 15дБ',
+    wild.last !== null && Math.abs(wild.last - BASE_GAIN * boostOf(15)) < 1e-6,
+    `${wild.last} против ${BASE_GAIN * boostOf(15)}`
   );
   const negative = await measure({ id: 'neg', db: -20 }, { maxBoostDb: -5 });
   check(
@@ -306,13 +322,13 @@ run('loudness: компенсация тихих роликов', async ({ brows
       () => window[Symbol.for('ytev.main.instance.v2')].loudness().boostDb
     );
     const after = await page.evaluate(() => {
-      window.__update({ normalizeLoudness: true, maxBoostDb: 10 });
+      window.__update({ normalizeLoudness: true, maxBoostDb: 15 });
       return window[Symbol.for('ytev.main.instance.v2')].loudness().boostDb;
     });
     await page.close();
     check(
       'смена предела применяется на лету',
-      Math.abs(before - 6) < 0.01 && Math.abs(after - 10) < 0.01,
+      Math.abs(before - 6) < 0.01 && Math.abs(after - 15) < 0.01,
       `${before}дБ → ${after}дБ`
     );
   }
@@ -331,8 +347,8 @@ run('loudness: компенсация тихих роликов', async ({ brows
   );
 
   // Находка полевой проверки на Cmp99FbMSqY: YouTube отдал DRC-дорожку,
-  // уже сведённую к −14 LKFS, а playerConfig.audioConfig.loudnessDb остался
-  // от исходной (−12.7дБ). Усиление поверх этого — двойная нормализация.
+  // уже сведённую к −14 LKFS. Теперь расширение выключает её и применяет
+  // собственный предел к исходной дорожке.
   const drcQuiet = await measure({
     id: 'drc',
     db: -12.7,
@@ -340,13 +356,18 @@ run('loudness: компенсация тихих роликов', async ({ brows
     drcNow: true,
   });
   check(
-    'при активной DRC-дорожке усиления нет',
-    drcQuiet.last !== null && Math.abs(drcQuiet.last - BASE_GAIN) < 1e-6,
-    `${drcQuiet.last} против ожидаемого ${BASE_GAIN}`
+    'DRC-дорожка заменена исходной и усилена расширением',
+    drcQuiet.last !== null &&
+      Math.abs(drcQuiet.last - BASE_GAIN * boostOf(6)) < 1e-6 &&
+      drcQuiet.drcPreferenceCalls.includes(0),
+    `${drcQuiet.last} против ожидаемого ${BASE_GAIN * boostOf(6)}`
   );
   check(
-    'диагностика сообщает про DRC',
-    drcQuiet.report && drcQuiet.report.drc === true && drcQuiet.report.boostDb === 0,
+    'диагностика подтверждает отключённую нормализацию YouTube',
+    drcQuiet.report &&
+      drcQuiet.report.drc === false &&
+      drcQuiet.report.boostDb === 6 &&
+      drcQuiet.report.youtubeNormalizationDisabled === true,
     JSON.stringify(drcQuiet.report)
   );
 
@@ -383,6 +404,7 @@ run('loudness: компенсация тихих роликов', async ({ brows
     db: -6,
     offersDrc: true,
     drcState: 2,
+    noDrcSetter: true,
     statsSilent: true,
   });
   check(
@@ -469,64 +491,66 @@ run('loudness: компенсация тихих роликов', async ({ brows
     `${stale.last} против ожидаемого ${BASE_GAIN}`
   );
 
-  // Полевой регресс 1.18.0: на Cmp99FbMSqY «стабильная громкость» выключается
-  // вручную, статистика переключается на исходную дорожку, а getDrcState()
-  // залипает на 0 — не меняется ни через пять секунд, ни после перезагрузки.
-  // Меняется только getDrcUserPreference() (1 → 0). Расширение продолжало
-  // показывать drc: true и не добирало положенные +6дБ.
-  //
-  // Переключение YouTube сопровождает событиями emptied и durationchange —
-  // проверяем, что решение обновляется по ним, а не по секундному тику:
-  // ждём заведомо меньше секунды.
+  // При включённой нашей нормализации Stable Volume должна быть выключена
+  // независимо от сохранённого предпочтения YouTube. Сторож продолжает
+  // проверять его после запуска: если YouTube включит DRC обратно без media-
+  // событий, расширение заметит это само.
   {
-    const toggle = async (from, to) => {
-      const page = await play({
-        id: 'preference',
+    const page = await play({
+      id: 'preference',
+      db: -12.7,
+      offersDrc: true,
+      drcState: 0, // залипает, как в поле
+      drcNow: true,
+      preference: 1,
+    });
+    await page.waitForTimeout(1200);
+    const initial = await readAll(page);
+    check(
+      'на старте Stable Volume выключается и работает наша нормализация',
+      initial.drcPreferenceCalls.includes(0) &&
+        initial.report.preference === 0 &&
+        initial.report.drc === false &&
+        Math.abs(initial.report.boostDb - 6) < 0.01,
+      JSON.stringify(initial)
+    );
+
+    await page.evaluate(() => {
+      window.__pref = 1;
+    });
+    await page.waitForTimeout(1200);
+    const restored = await readAll(page);
+    await page.close();
+    check(
+      'сторож повторно выключает Stable Volume без media-событий',
+      restored.drcPreferenceCalls.filter((value) => value === 0).length >= 2 &&
+        restored.report.preference === 0 &&
+        restored.report.drc === false &&
+        Math.abs(restored.report.boostDb - 6) < 0.01,
+      JSON.stringify(restored)
+    );
+
+    const nativePage = await play(
+      {
+        id: 'native-preference',
         db: -12.7,
         offersDrc: true,
-        drcState: 0, // залипает, как в поле
-        preferenceWhen: `window.__pref !== undefined ? window.__pref === 1 : ${from} === 1`,
-        drcWhen: `window.__pref !== undefined ? window.__pref === 1 : ${from} === 1`,
-      });
-      await page.waitForTimeout(1200);
-      const before = (await readAll(page)).report;
-      // Переключаем и читаем решение в одном заходе, без единой паузы: тик
-      // тут физически не успевает, поэтому изменение может прийти только от
-      // самих событий.
-      const after = await page.evaluate((next) => {
-        window.__pref = next;
-        const video = document.querySelector('video');
-        video.dispatchEvent(new Event('emptied'));
-        video.dispatchEvent(new Event('durationchange'));
-        return window[Symbol.for('ytev.main.instance.v2')].loudness();
-      }, to);
-      await page.close();
-      return { before, after };
-    };
-
-    const offNow = await toggle(1, 0);
-    check(
-      'выключение «стабильной громкости» возвращает усиление',
-      offNow.before.boostDb === 0 &&
-        offNow.before.drc === true &&
-        Math.abs(offNow.after.boostDb - 6) < 0.01 &&
-        offNow.after.drc === false,
-      `${offNow.before.boostDb}дБ → ${offNow.after.boostDb}дБ, ` +
-        `state=${offNow.after.state} preference=${offNow.after.preference}`
+        drcState: 0,
+        drcNow: true,
+        preference: 1,
+      },
+      { normalize: false }
     );
+    await nativePage.waitForTimeout(1200);
+    const native = await readAll(nativePage);
+    await nativePage.close();
     check(
-      'решение обновляется самими emptied/durationchange, без тика',
-      Math.abs(offNow.after.boostDb - 6) < 0.01,
-      'замер снят синхронно с событиями'
-    );
-
-    const onNow = await toggle(0, 1);
-    check(
-      'включение «стабильной громкости» снимает усиление',
-      Math.abs(onNow.before.boostDb - 6) < 0.01 &&
-        onNow.after.boostDb === 0 &&
-        onNow.after.drc === true,
-      `${onNow.before.boostDb}дБ → ${onNow.after.boostDb}дБ`
+      'при выключенной нашей нормализации предпочтение YouTube не меняется',
+      native.drcPreferenceCalls.length === 0 &&
+        native.report.preference === 1 &&
+        native.report.drc === true &&
+        native.report.boostDb === 0,
+      JSON.stringify(native)
     );
   }
 
@@ -542,6 +566,7 @@ run('loudness: компенсация тихих роликов', async ({ brows
       offersDrc: true,
       statsSilent: true,
       drcState: 0,
+      noDrcSetter: true,
       drcWhen: 'Date.now() - window.__started > 600',
     });
     await page.waitForTimeout(2200);
@@ -575,6 +600,8 @@ run('loudness: компенсация тихих роликов', async ({ brows
     const after = await page.evaluate(() => {
       window.__id = 'second'; // тот же элемент, другой ролик
       window.__state = 2; // снимок неполон: состояние дорожки неизвестно
+      window.__pref = 1;
+      document.getElementById('movie_player').setDrcUserPreference = undefined;
       document.querySelector('video').dispatchEvent(new Event('durationchange'));
       return window[Symbol.for('ytev.main.instance.v2')].loudness();
     });

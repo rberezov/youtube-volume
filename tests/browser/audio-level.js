@@ -21,8 +21,8 @@
 //    в числах, которыми обмениваются функции;
 //  - два ролика, записанных с разницей 6дБ, после выравнивания звучат
 //    одинаково — это и есть смысл настройки, и проверяется он замером;
-//  - усиление поверх DRC-дорожки не применяется (полевой регресс: двойная
-//    нормализация давала +6дБ на уже сведённом материале);
+//  - при нашей нормализации DRC-дорожка выключается, а исходная получает
+//    ровно выбранное усиление без двойной нормализации;
 //  - потолок 6дБ и запас до перегрузки: тон с пиком −6dBFS после подъёма
 //    упирается ровно в полную шкалу и не переходит её;
 //  - смена усиления идёт без щелчка — по отсчётам видно, что скачка нет.
@@ -203,11 +203,16 @@ function installPlayer(spec) {
     videoDetails: { videoId: spec.id },
     playerConfig: { audioConfig: { loudnessDb: spec.db, enablePerFormatLoudness: true } },
   });
-  // 0 — играет DRC-вариант, 1 — исходная дорожка.
+  // 0 — играет DRC-вариант, 1 — исходная дорожка. Как в полевом YouTube,
+  // getDrcState может залипнуть на 0, а реальный выбор виден по preference.
+  let preference = 1;
   player.getDrcState = () => (spec.drc ? 0 : 1);
-  player.getDrcUserPreference = () => 1;
+  player.getDrcUserPreference = () => preference;
+  player.setDrcUserPreference = (value) => {
+    preference = Number(value) === 1 ? 1 : 0;
+  };
   player.getStatsForNerds = () =>
-    spec.drc
+    spec.drc && preference === 1
       ? { volume: '100% / 100% (DRC (cont.-14.0 dB / tgt.-14.0 dB))' }
       : {
           volume: `100% / 100% (cont.${(-14 + spec.db).toFixed(1)} dB / tgt.-14.0 dB)`,
@@ -370,11 +375,11 @@ run('audio-level: реальный уровень сигнала на выход
     );
   }
 
-  // --- 3. DRC: усиливать нечего -------------------------------------------
+  // --- 3. DRC: выключаем и нормализуем исходную дорожку -------------------
   // Полевой регресс на Cmp99FbMSqY: YouTube отдал DRC-дорожку, сведённую к
-  // −14 LKFS, а loudnessDb в ответе остался от исходной (−12.7дБ). Подъём
-  // поверх этого — двойная нормализация, и слышно её как раз здесь.
-  section('DRC-дорожка не усиливается');
+  // −14 LKFS, а loudnessDb в ответе остался от исходной (−12.7дБ). Расширение
+  // должно сначала отключить DRC и только затем поднять исходную дорожку.
+  section('DRC выключается, работает нормализация расширения');
   {
     const spec = { id: 'drc', db: -12.7, drc: true };
     const withDrc = await playing(spec, { normalize: true });
@@ -386,8 +391,8 @@ run('audio-level: реальный уровень сигнала на выход
     await raw.close();
 
     check(
-      'на активной DRC-дорожке уровень такой же, как без выравнивания',
-      Math.abs(dB(drcLevel, rawLevel)) < 0.15,
+      'после отключения DRC исходная дорожка поднята на предел 6дБ',
+      Math.abs(dB(drcLevel, rawLevel) - 6) < 0.15,
       `${dB(drcLevel, rawLevel).toFixed(2)}дБ (пики ${show(drcLevel)} и ${show(rawLevel)})`
     );
   }
@@ -414,7 +419,7 @@ run('audio-level: реальный уровень сигнала на выход
 
     // Шесть децибел — значение по умолчанию, а не константа: предел выбирает
     // пользователь настройкой «Предел подъёма».
-    for (const cap of [3, 10]) {
+    for (const cap of [3, 10, 15]) {
       const page = await playing(
         { id: 'cap' + cap, db: -20 },
         { amp: QUIET_AMP, volume: 0.8, normalize: true, maxBoostDb: cap }

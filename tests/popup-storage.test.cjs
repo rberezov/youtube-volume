@@ -59,7 +59,7 @@ elements.get('sliderScale').max = '70';
 elements.get('shortsScale').min = '2';
 elements.get('shortsScale').max = '70';
 elements.get('maxBoostDb').min = '1';
-elements.get('maxBoostDb').max = '10';
+elements.get('maxBoostDb').max = '15';
 const windowListeners = new Map();
 const writes = [];
 
