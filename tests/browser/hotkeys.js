@@ -7,10 +7,12 @@
 // не срабатывают вовсе: ни отключение звука, ни пауза. Полевой отчёт был
 // именно такой: «работают только на английской раскладке».
 //
-// Расширение опознаёт клавишу ещё и по `e.code` (физическая клавиша, от
-// раскладки не зависит) и выполняет действие само, но только если через такт
-// состояние плеера не изменилось. Из этого следует главное, что здесь
-// проверяется: на латинской раскладке звук не должен переключиться дважды.
+// Расширение опознаёт клавишу по `e.code` (физическая клавиша, от раскладки
+// не зависит) и на чужой раскладке забирает событие себе: выполняет действие
+// сразу и останавливает дальнейшую доставку. Отсюда два условия, которые тут
+// и проверяются: на латинской раскладке звук не должен переключиться дважды,
+// а на кириллице — не должен вернуться обратно, каким бы поздним ни оказался
+// обработчик YouTube.
 //
 // Нажатия идут через CDP: Playwright умеет слать код клавиши, но не умеет
 // подставить чужой символ, а нужна именно пара «символ „ь“ на клавише KeyM».
@@ -20,19 +22,34 @@ const { openPage, run } = require('./harness');
 
 // Обработчик самого YouTube, каким он виден снаружи: смотрит на символ и
 // поэтому понимает только латиницу.
-function installYouTubeHotkeys() {
+//
+// delay — насколько поздно он отвечает. Полевая проверка показала, что нулём
+// это считать нельзя: звук глох и тут же возвращался (слышно как треск), то
+// есть обработчик YouTube успевал переключить его обратно после нас. Поэтому
+// в тестах он умеет отвечать и с задержкой, а расширение обязано быть
+// правым при любой.
+function installYouTubeHotkeys(delay = 0, byCode = false) {
   window.__handled = [];
   document.addEventListener('keydown', (e) => {
+    const act = (fn) => (delay ? setTimeout(fn, delay) : fn());
     const key = String(e.key).toLowerCase();
     const video = document.querySelector('#movie_player video');
     if (!video) return;
-    if (key === 'm') {
-      video.muted = !video.muted;
-      window.__handled.push('m');
-    } else if (key === 'k') {
-      if (video.paused) video.play().catch(() => {});
-      else video.pause();
-      window.__handled.push('k');
+    // byCode — гипотеза «а вдруг YouTube смотрит на код клавиши»: тогда он
+    // отвечает и на «ь». Расширение обязано остаться правым и в этом случае.
+    const isMute = byCode ? e.code === 'KeyM' : key === 'm';
+    const isPlay = byCode ? e.code === 'KeyK' : key === 'k';
+    if (isMute) {
+      act(() => {
+        video.muted = !video.muted;
+        window.__handled.push('m');
+      });
+    } else if (isPlay) {
+      act(() => {
+        if (video.paused) video.play().catch(() => {});
+        else video.pause();
+        window.__handled.push('k');
+      });
     }
   });
 }
@@ -74,14 +91,17 @@ const state = (page) =>
 run('hotkeys: m и k на любой раскладке', async ({ browser, reporter, errors }) => {
   const { check, section } = reporter;
 
-  async function open(options = {}) {
+  async function open({ delay = 0, byCode = false, ...options } = {}) {
     const page = await openPage(browser, {
       errors,
       ...options,
       before: async (target) => {
-        await target.evaluate((install) => {
-          new Function('return ' + install)()();
-        }, installYouTubeHotkeys.toString());
+        await target.evaluate(
+          ([install, ms, code]) => {
+            new Function('return ' + install)()(ms, code);
+          },
+          [installYouTubeHotkeys.toString(), delay, byCode]
+        );
       },
     });
     // Ролик должен играть: пауза проверяется по фактическому состоянию.
@@ -177,6 +197,40 @@ run('hotkeys: m и k на любой раскладке', async ({ browser, repo
       'повторное «л» снимает с паузы',
       (await state(page)).paused === false,
       JSON.stringify(await state(page))
+    );
+    await page.close();
+  }
+
+  // --- 2b. Поздний обработчик YouTube -------------------------------------
+  // Ровно то, что нашлось в поле. Первая версия решала отложенно: «если
+  // через такт состояние не изменилось — переключаю сам». Стоит обработчику
+  // YouTube ответить чуть позже — и он отменяет наше переключение: звук
+  // глохнет и тут же возвращается, слышно как треск, а клавиша выглядит
+  // нерабочей. Теперь на чужой раскладке событие забирается целиком.
+  section('YouTube отвечает с задержкой');
+  {
+    const page = await open({ delay: 60, byCode: true });
+    await press(page, 'KeyM', 'cyrillic');
+    await page.waitForTimeout(300);
+    const after = await state(page);
+    check(
+      'звук остался выключенным, а не вернулся',
+      after.muted === true,
+      JSON.stringify(after)
+    );
+    check(
+      'до обработчика YouTube событие не дошло — переключения ровно одно',
+      after.handled.length === 0,
+      JSON.stringify(after.handled)
+    );
+
+    await press(page, 'KeyK', 'cyrillic');
+    await page.waitForTimeout(300);
+    const paused = await state(page);
+    check(
+      'пауза тоже не отменяется',
+      paused.paused === true && paused.handled.length === 0,
+      JSON.stringify(paused)
     );
     await page.close();
   }
