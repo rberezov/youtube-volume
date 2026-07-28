@@ -43,6 +43,12 @@ const LOUD_AMP = 0.5;
 const dB = (value, reference) => 20 * Math.log10(value / reference);
 const boostOf = (db) => Math.pow(10, db / 20);
 
+// Полевой случай: Shorts с loudnessDb +3.48 и статистикой «100%/67%».
+// Запись во столько же раз громче цели, во сколько YouTube собирался её
+// приглушить.
+const HOT_DB = 3.48;
+const HOT_AMP = QUIET_AMP * boostOf(HOT_DB);
+
 const tones = new Map();
 function tone(amp) {
   if (tones.has(amp)) return tones.get(amp);
@@ -500,5 +506,53 @@ run('audio-level: реальный уровень сигнала на выход
       )})`
     );
     await page.close();
+  }
+
+  // --- 7. Громкий ролик: приглушение, которое иначе теряется ---------------
+  // YouTube приглушает громкий ролик сам — записью в video.volume. Но эти
+  // записи расширение откатывает к сохранённому уровню (иначе YouTube
+  // сбрасывал бы громкость на своё значение при каждом переходе), и до звука
+  // приглушение не доезжало: полевой Shorts с loudnessDb +3.48 играл на
+  // 3.5дБ громче, чем без расширения. Проверка — по звуку: запись, которая
+  // на 3.48дБ громче сведённой, обязана прийти к тому же уровню.
+  section('приглушение громкого ролика');
+  {
+    const measure = async (spec, amp, normalize) => {
+      const page = await playing(spec, { amp, normalize });
+      const value = await level(page);
+      await page.close();
+      return value.peak;
+    };
+
+    const target = await measure({ id: 'target', db: 0 }, QUIET_AMP, false);
+    const hot = await measure({ id: 'hot', db: HOT_DB }, HOT_AMP, false);
+    check(
+      'громкий ролик приходит к тому же уровню, что и сведённый',
+      Math.abs(dB(hot, target)) < 0.2,
+      `${dB(hot, target).toFixed(2)}дБ (пики ${show(hot)} и ${show(target)})`
+    );
+
+    // Приглушение — возврат к поведению YouTube, а не наша добавка: настройка
+    // управляет только подъёмом тихих.
+    const hotOn = await measure({ id: 'hot', db: HOT_DB }, HOT_AMP, true);
+    check(
+      'настройка выравнивания на приглушение не влияет',
+      Math.abs(dB(hotOn, hot)) < 0.15,
+      `${dB(hotOn, hot).toFixed(2)}дБ`
+    );
+
+    // Запас до перегрузки приглушение только увеличивает — проверяем, что
+    // громкая запись на полной громкости не упирается в шкалу.
+    const full = await playing(
+      { id: 'hotfull', db: HOT_DB },
+      { amp: HOT_AMP, volume: 1, normalize: false }
+    );
+    const loudest = await level(full);
+    await full.close();
+    check(
+      'на полной громкости громкий ролик не перегружает',
+      loudest.peak <= 1.0001,
+      `пик ${show(loudest.peak)}`
+    );
   }
 });

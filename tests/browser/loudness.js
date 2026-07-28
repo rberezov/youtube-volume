@@ -216,11 +216,45 @@ run('loudness: компенсация тихих роликов', async ({ brows
     `${off.last} против ожидаемого ${BASE_GAIN}`
   );
 
+  // Раньше здесь стояло «громкий ролик не трогаем — его YouTube приглушил
+  // сам». Допущение оказалось неверным: приглушение плеер применяет записью
+  // в video.volume, а мы такие записи откатываем к сохранённому уровню, и до
+  // звука оно не доезжает. Полевой случай — Shorts с loudnessDb +3.48: играл
+  // на 3.5дБ громче, чем без расширения. Раз громкость перехватываем мы,
+  // приглушать тоже нам.
   const loud = await measure({ id: 'loud', db: 4 });
   check(
-    'громкий ролик не трогаем — его YouTube приглушил сам',
-    loud.last !== null && Math.abs(loud.last - BASE_GAIN) < 1e-6,
-    `${loud.last} против ожидаемого ${BASE_GAIN}`
+    'громкий ролик приглушается на свои 4дБ',
+    loud.last !== null && Math.abs(loud.last - BASE_GAIN * boostOf(-4)) < 1e-6,
+    `${loud.last} против ожидаемого ${BASE_GAIN * boostOf(-4)}`
+  );
+  check(
+    'диагностика показывает приглушение отрицательным усилением',
+    loud.report && Math.abs(loud.report.boostDb + 4) < 0.01,
+    JSON.stringify(loud.report)
+  );
+
+  // Приглушение — возврат к поведению YouTube, а не наша добавка, поэтому
+  // настройка на него не влияет. Подъём тихих — влияет.
+  const loudOff = await measure({ id: 'loud', db: 4 }, { normalize: false });
+  check(
+    'приглушение работает и с выключенной настройкой',
+    loudOff.last !== null && Math.abs(loudOff.last - BASE_GAIN * boostOf(-4)) < 1e-6,
+    `${loudOff.last} против ожидаемого ${BASE_GAIN * boostOf(-4)}`
+  );
+
+  // На DRC-дорожке приглушать нечего: она уже сведена к цели, а loudnessDb в
+  // ответе остался от исходной дорожки.
+  const loudDrc = await measure({
+    id: 'louddrc',
+    db: 4,
+    offersDrc: true,
+    drcNow: true,
+  });
+  check(
+    'на активной DRC-дорожке громкий ролик не приглушается',
+    loudDrc.last !== null && Math.abs(loudDrc.last - BASE_GAIN) < 1e-6,
+    `${loudDrc.last} против ожидаемого ${BASE_GAIN}`
   );
 
   const veryQuiet = await measure({ id: 'very', db: -20 });
