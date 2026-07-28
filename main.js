@@ -818,10 +818,38 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   const YOUTUBE_NORMALIZATION_GUARD_MS = 1000;
   const YOUTUBE_NORMALIZATION_RETRY_MS = 100;
   let youtubeNormalizationGuardTimer = 0;
+  let youtubeNormalizationRestoreTimer = 0;
   let youtubeNormalizationPending = false;
   let youtubeNormalizationApiAvailable = false;
   let youtubeNormalizationForcedOff = false;
   let youtubeNormalizationRetryCount = 0;
+  let youtubeDrcRestoreNeeded = false;
+  let youtubeDrcRestoreStateLoaded = false;
+  let youtubeDrcRestoreStateTracked = false;
+
+  function requestYouTubeDrcStateSync() {
+    window.postMessage(
+      {
+        type: 'YTEV_DRC_STATE_DIRTY',
+        channel: CHANNEL_ID,
+      },
+      PAGE_ORIGIN
+    );
+  }
+
+  function rememberYouTubeDrcWasEnabled() {
+    if (youtubeDrcRestoreStateTracked && youtubeDrcRestoreNeeded) return;
+    youtubeDrcRestoreStateTracked = true;
+    youtubeDrcRestoreNeeded = true;
+    requestYouTubeDrcStateSync();
+  }
+
+  function rememberYouTubeDrcWasDisabled() {
+    if (youtubeDrcRestoreStateTracked) return;
+    youtubeDrcRestoreStateTracked = true;
+    youtubeDrcRestoreNeeded = false;
+    requestYouTubeDrcStateSync();
+  }
 
   function scheduleYouTubeNormalizationGuard(delay = YOUTUBE_NORMALIZATION_GUARD_MS) {
     if (!SETTINGS.normalizeLoudness || youtubeNormalizationGuardTimer) return;
@@ -844,6 +872,63 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     youtubeNormalizationRetryCount = 0;
   }
 
+  function stopYouTubeNormalizationRestore() {
+    clearTimeout(youtubeNormalizationRestoreTimer);
+    youtubeNormalizationRestoreTimer = 0;
+  }
+
+  function scheduleYouTubeNormalizationRestore(delay = YOUTUBE_NORMALIZATION_GUARD_MS) {
+    if (
+      SETTINGS.normalizeLoudness ||
+      !youtubeDrcRestoreNeeded ||
+      youtubeNormalizationRestoreTimer
+    ) {
+      return;
+    }
+    youtubeNormalizationRestoreTimer = setTimeout(() => {
+      youtubeNormalizationRestoreTimer = 0;
+      if (SETTINGS.normalizeLoudness || !youtubeDrcRestoreNeeded) return;
+      if (restoreYouTubeNormalization(getPlayer())) refreshLoudness();
+    }, delay);
+  }
+
+  /**
+   * Возвращаем YouTube Stable Volume только если расширение само выключило
+   * ранее включённое предпочтение. Если пользователь держал Stable Volume
+   * выключенной, маркера нет и расширение не меняет его выбор.
+   */
+  function restoreYouTubeNormalization(player) {
+    stopYouTubeNormalizationGuard();
+    youtubeNormalizationForcedOff = false;
+    youtubeNormalizationPending = false;
+    if (!youtubeDrcRestoreNeeded) {
+      stopYouTubeNormalizationRestore();
+      return true;
+    }
+
+    const hasSetter = !!(player && typeof player.setDrcUserPreference === 'function');
+    youtubeNormalizationApiAvailable =
+      hasSetter && typeof player.getDrcUserPreference === 'function';
+    if (!hasSetter) {
+      scheduleYouTubeNormalizationRestore();
+      return false;
+    }
+
+    try {
+      // Это глобальное предпочтение YouTube. Сам плеер применит DRC только к
+      // роликам, для которых такая дорожка действительно существует.
+      player.setDrcUserPreference(1);
+      youtubeDrcRestoreNeeded = false;
+      requestYouTubeDrcStateSync();
+      stopYouTubeNormalizationRestore();
+      resetLoudness();
+      return true;
+    } catch {
+      scheduleYouTubeNormalizationRestore();
+      return false;
+    }
+  }
+
   /**
    * Наша нормализация и YouTube Stable Volume не должны работать одновременно.
    *
@@ -855,18 +940,18 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
    */
   function disableYouTubeNormalization(player) {
     if (!SETTINGS.normalizeLoudness) {
-      stopYouTubeNormalizationGuard();
-      youtubeNormalizationApiAvailable = false;
-      youtubeNormalizationForcedOff = false;
-      return true;
+      return restoreYouTubeNormalization(player);
     }
 
+    stopYouTubeNormalizationRestore();
     const hasGetter = !!(player && typeof player.getDrcUserPreference === 'function');
     const hasSetter = !!(player && typeof player.setDrcUserPreference === 'function');
     youtubeNormalizationApiAvailable = hasGetter && hasSetter;
     const preference = hasGetter ? callPlayer(player, 'getDrcUserPreference') : undefined;
+    const normalizedPreference = Number(preference);
 
-    if (preference === 0) {
+    if (normalizedPreference === 0) {
+      rememberYouTubeDrcWasDisabled();
       youtubeNormalizationPending = false;
       youtubeNormalizationForcedOff = true;
       youtubeNormalizationRetryCount = 0;
@@ -890,6 +975,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
     youtubeNormalizationPending = true;
     youtubeNormalizationForcedOff = false;
+    if (normalizedPreference === 1) rememberYouTubeDrcWasEnabled();
     // Пока исходная дорожка не подтверждена, снимаем прежнее усиление: иначе
     // на короткое время получилась бы двойная нормализация поверх активного DRC.
     if (preference !== undefined) resetLoudness();
@@ -1414,13 +1500,34 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   function applyTrustedPayload(payload, includeState = false) {
     if (!payload || typeof payload !== 'object') return false;
+    const state =
+      includeState && payload.state && typeof payload.state === 'object'
+        ? payload.state
+        : {};
+    // Сначала читаем маркер восстановления, и только потом применяем настройки:
+    // refreshLoudness() может сразу выключить YouTube DRC. При обратном порядке
+    // после перезапуска терялось бы знание, что DRC нужно вернуть.
+    if (includeState && !youtubeDrcRestoreStateLoaded) {
+      youtubeDrcRestoreStateTracked =
+        typeof state.restoreYoutubeDrc === 'boolean';
+      youtubeDrcRestoreNeeded = state.restoreYoutubeDrc === true;
+      youtubeDrcRestoreStateLoaded = true;
+      // Миграция с 1.31.0: та версия уже могла сохранить YouTube preference=0,
+      // но ещё не записывала исходное состояние. Если наша нормализация была
+      // включена во время обновления, один раз считаем DRC отключённой нами.
+      if (
+        !youtubeDrcRestoreStateTracked &&
+        payload.settings &&
+        payload.settings.normalizeLoudness === true
+      ) {
+        youtubeDrcRestoreStateTracked = true;
+        youtubeDrcRestoreNeeded = true;
+        requestYouTubeDrcStateSync();
+      }
+    }
     applySettings(payload.settings);
     applyStrings(payload.strings);
     if (!volumeStateLoaded) {
-      const state =
-        includeState && payload.state && typeof payload.state === 'object'
-          ? payload.state
-          : {};
       const savedValue = state.savedVolume;
       const savedVolume = Number(savedValue);
       if (!preferredVolumeDirty && savedValue != null && validVolume(savedVolume)) {
@@ -1487,6 +1594,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
           !SETTINGS.normalizeLoudness || youtubeNormalizationForcedOff,
         youtubeNormalizationPending,
         youtubeNormalizationApiAvailable,
+        youtubeDrcRestoreNeeded,
+        youtubeDrcRestoreStateTracked,
+        youtubeNormalizationRestorePending:
+          !SETTINGS.normalizeLoudness && youtubeDrcRestoreNeeded,
         boost: loudnessBoost,
         boostDb: Number((20 * Math.log10(loudnessBoost)).toFixed(2)),
         maxBoostDb: SETTINGS.maxBoostDb,
@@ -1495,6 +1606,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     update(candidateSecret, payload) {
       if (candidateSecret !== updateSecret) return false;
       return applyTrustedPayload(payload, false);
+    },
+    drcRestoreState(candidateSecret) {
+      if (candidateSecret !== updateSecret) return null;
+      return youtubeDrcRestoreNeeded;
     },
   });
 
@@ -3392,6 +3507,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     clearTimeout(persistTimer);
     clearTimeout(earlyHideSafetyTimer);
     clearTimeout(youtubeNormalizationGuardTimer);
+    clearTimeout(youtubeNormalizationRestoreTimer);
     for (const off of teardown.splice(0)) {
       try {
         off();

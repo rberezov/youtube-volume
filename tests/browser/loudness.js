@@ -170,15 +170,24 @@ run('loudness: компенсация тихих роликов', async ({ brows
   const { check } = reporter;
 
   // Поднимает страницу с макетом плеера и запущенным тоном.
-  async function play(spec, { normalize = true, maxBoostDb } = {}) {
+  async function play(
+    spec,
+    { normalize = true, maxBoostDb, state, withBridge = false } = {}
+  ) {
     const settings = { normalizeLoudness: normalize };
     if (maxBoostDb !== undefined) settings.maxBoostDb = maxBoostDb;
     const page = await openPage(browser, {
       withMain: settings,
+      withBridge,
+      state,
       errors,
       before: async (target) => {
         await target.evaluate(
           ([install, record, s, tone]) => {
+            window.__pageMessages = [];
+            window.addEventListener('message', (event) => {
+              if (event.source === window) window.__pageMessages.push(event.data);
+            });
             new Function('return ' + record)()();
             new Function('return ' + install)()(s, tone);
           },
@@ -551,6 +560,123 @@ run('loudness: компенсация тихих роликов', async ({ brows
         native.report.drc === true &&
         native.report.boostDb === 0,
       JSON.stringify(native)
+    );
+
+    const restoredPage = await play(
+      {
+        id: 'restore-preference',
+        db: -12.7,
+        offersDrc: true,
+        drcState: 0,
+        drcNow: true,
+        preference: 1,
+      },
+      { withBridge: true }
+    );
+    await restoredPage.waitForTimeout(1200);
+    await restoredPage.evaluate(() => {
+      window.__update({ normalizeLoudness: false });
+    });
+    await restoredPage.waitForTimeout(400);
+    const restoredNative = await restoredPage.evaluate(() => ({
+      calls: window.__drcPreferenceCalls.slice(),
+      runtimeMessages: window.__runtimeMessages.slice(),
+      pageMessages: window.__pageMessages.slice(),
+      report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
+    }));
+    await restoredPage.close();
+    check(
+      'выключение нашей нормализации возвращает ранее включённую Stable Volume',
+      restoredNative.calls.includes(0) &&
+        restoredNative.calls.at(-1) === 1 &&
+        restoredNative.report.enabled === false &&
+        restoredNative.report.preference === 1 &&
+        restoredNative.report.drc === true &&
+        restoredNative.report.youtubeDrcRestoreNeeded === false &&
+        restoredNative.runtimeMessages.filter(
+          (message) => message.type === 'YTEV_SYNC_DRC_STATE'
+        ).length >= 2 &&
+        restoredNative.pageMessages
+          .filter((message) => message && message.type === 'YTEV_DRC_STATE_DIRTY')
+          .every((message) => !('secret' in message) && !('needed' in message)),
+      JSON.stringify(restoredNative)
+    );
+
+    const stayedOffPage = await play(
+      {
+        id: 'keep-native-off',
+        db: -6,
+        offersDrc: true,
+        drcState: 1,
+        preference: 0,
+      },
+      { normalize: false }
+    );
+    await stayedOffPage.evaluate(() => {
+      window.__update({ normalizeLoudness: true });
+    });
+    await stayedOffPage.waitForTimeout(1200);
+    await stayedOffPage.evaluate(() => {
+      window.__update({ normalizeLoudness: false });
+    });
+    await stayedOffPage.waitForTimeout(200);
+    const stayedOff = await readAll(stayedOffPage);
+    await stayedOffPage.close();
+    check(
+      'если Stable Volume была выключена пользователем, расширение не включает её',
+      stayedOff.drcPreferenceCalls.length === 0 &&
+        stayedOff.report.preference === 0 &&
+        stayedOff.report.youtubeDrcRestoreNeeded === false,
+      JSON.stringify(stayedOff)
+    );
+
+    const migratedPage = await play({
+      id: 'legacy-guard-migration',
+      db: -12.7,
+      offersDrc: true,
+      drcState: 0,
+      drcNow: true,
+      preference: 0,
+    });
+    await migratedPage.waitForTimeout(200);
+    await migratedPage.evaluate(() => {
+      window.__update({ normalizeLoudness: false });
+    });
+    await migratedPage.waitForTimeout(200);
+    const migrated = await readAll(migratedPage);
+    await migratedPage.close();
+    check(
+      'после обновления с 1.31.0 ранее отключённая расширением DRC возвращается',
+      migrated.drcPreferenceCalls.includes(1) &&
+        migrated.report.preference === 1 &&
+        migrated.report.youtubeDrcRestoreNeeded === false,
+      JSON.stringify(migrated)
+    );
+
+    const recoveredPage = await play(
+      {
+        id: 'restore-after-restart',
+        db: -12.7,
+        offersDrc: true,
+        drcState: 0,
+        drcNow: true,
+        preference: 0,
+      },
+      {
+        normalize: false,
+        state: { restoreYoutubeDrc: true },
+      }
+    );
+    await recoveredPage.waitForTimeout(200);
+    const recovered = await readAll(recoveredPage);
+    await recoveredPage.close();
+    check(
+      'незавершённое восстановление DRC продолжается после перезапуска',
+      recovered.drcPreferenceCalls.length === 1 &&
+        recovered.drcPreferenceCalls[0] === 1 &&
+        recovered.report.preference === 1 &&
+        recovered.report.youtubeDrcRestoreNeeded === false,
+      JSON.stringify(recovered)
     );
   }
 

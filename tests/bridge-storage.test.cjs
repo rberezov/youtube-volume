@@ -560,11 +560,32 @@ assert.equal(saved[8].savedVolume, 0.73);
 page.shortsSlider = null;
 locationMock.pathname = '/watch';
 
-onStorageChanged({ gamma: { newValue: 2.5 } }, 'sync');
+// MAIN-мир сообщает только, что состояние DRC изменилось. Сам boolean bridge
+// не принимает: он просит service worker прочитать его защищённым вызовом.
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: {
+    type: 'YTEV_DRC_STATE_DIRTY',
+    channel: 'ffffffffffffffffffffffffffffffff',
+  },
+});
+assert.equal(runtimeMessages.length, 1, 'another channel must not request a DRC sync');
+onMessage({
+  source: windowMock,
+  origin: 'https://www.youtube.com',
+  data: { type: 'YTEV_DRC_STATE_DIRTY', channel },
+});
 assert.equal(runtimeMessages.length, 2);
-assert.equal(runtimeMessages[1].type, 'YTEV_UPDATE_SETTINGS');
-assert.equal(runtimeMessages[1].channel, channel);
+assert.equal(runtimeMessages[1].type, 'YTEV_SYNC_DRC_STATE');
 assert.equal(runtimeMessages[1].secret, runtimeMessages[0].secret);
+assert.equal(saved.length, 9, 'bridge must not trust or persist page-supplied DRC state');
+
+onStorageChanged({ gamma: { newValue: 2.5 } }, 'sync');
+assert.equal(runtimeMessages.length, 3);
+assert.equal(runtimeMessages[2].type, 'YTEV_UPDATE_SETTINGS');
+assert.equal(runtimeMessages[2].channel, channel);
+assert.equal(runtimeMessages[2].secret, runtimeMessages[0].secret);
 assert.equal(posted.length, 0, 'settings updates must stay outside window messaging');
 
 onStorageChanged(
@@ -576,6 +597,6 @@ assert.equal(
   false,
   'switching to the YouTube slider must reveal native controls immediately'
 );
-assert.equal(runtimeMessages.length, 3);
+assert.equal(runtimeMessages.length, 4);
 
 console.log('bridge storage smoke test passed');

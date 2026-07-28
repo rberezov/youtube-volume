@@ -107,12 +107,14 @@ function bootScript({ settings, state, channel = CHANNEL, secret = SECRET } = {}
 // (например, через page.exposeFunction).
 function chromeStub() {
   window.__writes = [];
+  window.__runtimeMessages = [];
   window.__init = null;
   window.chrome = {
     runtime: {
       id: 'test',
       lastError: null,
       sendMessage: (message) => {
+        window.__runtimeMessages.push(message);
         if (message && message.type === 'YTEV_INIT') window.__init = message;
       },
     },
