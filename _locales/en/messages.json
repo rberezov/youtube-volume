@@ -82,7 +82,21 @@
     "message": "Normalize video loudness"
   },
   "normalizeDescription": {
-    "message": "Bring quiet videos up when YouTube's stable volume is off or unavailable"
+    "message": "Bring quiet videos up to a common level"
+  },
+  "maxBoostTitle": {
+    "message": "Boost limit",
+    "description": "Popup: cap for the loudness boost of quiet videos"
+  },
+  "maxBoostValue": {
+    "message": "$DB$ dB",
+    "description": "Popup: current boost limit, in decibels",
+    "placeholders": {
+      "db": {
+        "content": "$1",
+        "example": "6"
+      }
+    }
   },
   "saveSaved": {
     "message": "Saved"

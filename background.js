@@ -14,6 +14,7 @@ const DEFAULTS = {
   collapseDelay: false,
   useNativeSlider: false,
   normalizeLoudness: false,
+  maxBoostDb: 6,
 };
 
 function allowedSender(sender) {

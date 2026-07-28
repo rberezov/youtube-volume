@@ -39,8 +39,9 @@
   выезжает и убирается плавно, проценты появляются следом за ней. Есть режим
   с задержкой перед сворачиванием — удобно с длинной шкалой.
 • Выравнивание громкости роликов, по желанию: тихие подтягиваются к общему
-  уровню, не больше чем на 6 дБ. Пригодится, когда «стабильная громкость»
-  YouTube выключена или недоступна; по умолчанию выключено.
+  уровню. Предел подъёма выбирается — от 1 до 10 дБ, по умолчанию 6.
+  Пригодится, когда «стабильная громкость» YouTube выключена или недоступна;
+  по умолчанию выключено.
 • Режим «использовать шкалу YouTube»: свой ползунок не строится, а
   экспоненциальная кривая продолжает работать.
 • Если в панели не хватает места, ползунок укорачивается, затем прячутся
@@ -91,8 +92,9 @@ WHAT ELSE
   slider slides out and back smoothly, with the percentage following it. A
   collapse delay mode is available — handy with a long slider.
 • Optional loudness matching across videos: quiet ones are brought up towards
-  a common level, by no more than 6 dB. Useful when YouTube's own stable
-  volume is off or unavailable; disabled by default.
+  a common level, with a boost limit you choose — 1 to 10 dB, 6 by default.
+  Useful when YouTube's own stable volume is off or unavailable; disabled by
+  default.
 • "Use the YouTube slider" mode: no custom slider is built, while the
   exponential curve keeps working.
 • When the control bar runs out of room the slider shrinks, then the

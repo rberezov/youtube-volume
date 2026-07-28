@@ -77,6 +77,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     teardown.push(() => target.removeEventListener(type, handler, options));
   }
 
+  // Потолок для настройки «предел подъёма»: выше у материала обычно уже нет
+  // запаса до пика, а лимитера у нас нет.
+  const MAX_BOOST_LIMIT_DB = 10;
+
   const SETTINGS = {
     enabled: true,          // применять экспоненциальную кривую
     gamma: 3,               // крутизна кривой: real = logical^gamma (1 = линейно)
@@ -87,6 +91,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     collapseDelay: false,   // сворачивать не сразу, дав шкале открыться
     useNativeSlider: false, // не строить свою шкалу — оставить штатную
     normalizeLoudness: false, // подтягивать тихие ролики к общему уровню
+    maxBoostDb: 6,          // предел подъёма тихих, дБ (приглушение не трогает)
   };
   const EARLY_HIDE_CLASS = 'ytev-native-volume-hidden';
   const EARLY_HIDE_MANAGED_CLASS = 'ytev-native-volume-managed';
@@ -140,12 +145,16 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     const gamma = Number(value.gamma);
     const sliderScale = Number(value.sliderScale);
     const shortsScale = Number(value.shortsScale);
+    const maxBoostDb = Number(value.maxBoostDb);
     if (Number.isFinite(gamma)) SETTINGS.gamma = Math.min(6, Math.max(1, gamma));
     if (Number.isFinite(sliderScale)) {
       SETTINGS.sliderScale = Math.min(70, Math.max(2, sliderScale));
     }
     if (Number.isFinite(shortsScale)) {
       SETTINGS.shortsScale = Math.min(70, Math.max(2, shortsScale));
+    }
+    if (Number.isFinite(maxBoostDb)) {
+      SETTINGS.maxBoostDb = Math.min(MAX_BOOST_LIMIT_DB, Math.max(1, maxBoostDb));
     }
     setEarlyNativeHidden(!SETTINGS.useNativeSlider);
   }
@@ -682,13 +691,13 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
    * 3.5дБ громче, чем без расширения. Поэтому приглушение восстанавливается
    * независимо от настройки — это возврат к поведению YouTube, а не добавка.
    *
-   * Добираем осторожно: не больше 6дБ и только нехватку. Это сознательно
+   * Добираем осторожно: только нехватку и не больше выбранного предела
+   * (по умолчанию 6дБ, настройка «Предел подъёма»). Это сознательно
    * консервативно — у материала, который на N дБ тише цели, обычно есть
    * примерно столько же запаса до пика, поэтому лимитер (он добавил бы
    * задержку и рассинхрон с картинкой) не нужен.
    * ------------------------------------------------------------------ */
 
-  const MAX_BOOST_DB = 6;
   // События дорожки, на которых имеет смысл перечитать снимок. emptied и
   // durationchange — это ровно то, что YouTube испускает при ручном
   // переключении «стабильной громкости»: без них решение ждало бы тика.
@@ -906,7 +915,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // прямо во время ролика — и состояние настройки: подъём тихих зависит
     // от неё, и при переключении решение обязано пересчитаться.
     const key = `${snap.id}|${snap.drc ? 'drc' : 'raw'}|${
-      SETTINGS.normalizeLoudness ? 'on' : 'off'
+      SETTINGS.normalizeLoudness ? SETTINGS.maxBoostDb : 'off'
     }`;
     if (key === loudnessKey) return;
     loudnessKey = key;
@@ -931,7 +940,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   function loudnessDbFor(snap) {
     if (snap.drc) return 0;
     if (snap.db > 0) return -snap.db;
-    return SETTINGS.normalizeLoudness ? Math.min(MAX_BOOST_DB, -snap.db) : 0;
+    return SETTINGS.normalizeLoudness ? Math.min(SETTINGS.maxBoostDb, -snap.db) : 0;
   }
 
   // Итоговое усиление в графе. Компенсация живёт только здесь: запасной
@@ -1270,7 +1279,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         preference: snap.preference,
         boost: loudnessBoost,
         boostDb: Number((20 * Math.log10(loudnessBoost)).toFixed(2)),
-        maxBoostDb: MAX_BOOST_DB,
+        maxBoostDb: SETTINGS.maxBoostDb,
       };
     },
     update(candidateSecret, payload) {

@@ -234,6 +234,32 @@ h2 {
   font-weight: 550;
 }
 
+/* Подчинённый ползунок в одну строку: подпись, шкала, значение. Попап
+   упирается в предел Chrome (600px), поэтому отдельной строки под описание
+   здесь нет — смысл уточняет подпись над ним. */
+.range-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 28px;
+}
+
+.range-row--sub {
+  padding-left: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.range-row label {
+  font-size: 13px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.range-row .range {
+  flex: 1;
+  min-width: 0;
+}
+
 .switch-copy {
   display: grid;
   gap: 2px;

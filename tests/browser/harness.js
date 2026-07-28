@@ -33,6 +33,7 @@ const DEFAULT_SETTINGS = {
   collapseDelay: false,
   useNativeSlider: false,
   normalizeLoudness: false,
+  maxBoostDb: 6,
 };
 
 // Браузерные тесты меряют и щупают развёрнутый блок, поэтому по умолчанию

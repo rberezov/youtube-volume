@@ -44,6 +44,7 @@ assert.deepEqual(
     'collapseDelay',
     'enabled',
     'gamma',
+    'maxBoostDb',
     'normalizeLoudness',
     'shortsScale',
     'showPercent',
@@ -75,6 +76,7 @@ for (const [id, value] of [
   ['gamma', reference.gamma],
   ['sliderScale', reference.sliderScale],
   ['shortsScale', reference.shortsScale],
+  ['maxBoostDb', reference.maxBoostDb],
 ]) {
   const input = popupHtml.match(new RegExp(`<input[^>]*id="${id}"[^>]*>`));
   assert.ok(input, `в popup.html не найден ползунок ${id}`);

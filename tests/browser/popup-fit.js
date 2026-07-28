@@ -48,15 +48,23 @@ const measure = (page) =>
   page.evaluate(() => ({
     height: document.body.scrollHeight,
     delayRow: !document.getElementById('collapseDelayRow').hidden,
+    boostRow: !document.getElementById('maxBoostRow').hidden,
     ownRows: [...document.querySelectorAll('.own-only')].filter((el) => !el.hidden).length,
   }));
 
 (async () => {
   const browser = await chromium.launch();
 
-  // Худший случай: своя шкала и включённое автосворачивание — видны все
-  // строки, включая подчинённую «Задержка перед сворачиванием».
-  const full = await open(browser, { autoCollapse: true, useNativeSlider: false });
+  // Худший случай: своя шкала, включённое автосворачивание и включённое
+  // выравнивание — видны обе подчинённые строки, «Задержка перед
+  // сворачиванием» и «Предел подъёма». Выравнивание сюда добавили не сразу:
+  // по умолчанию оно выключено, и без него замер показывал бы запас, которого
+  // у включившего настройку нет.
+  const full = await open(browser, {
+    autoCollapse: true,
+    useNativeSlider: false,
+    normalizeLoudness: true,
+  });
   const widest = await measure(full);
   check(
     'попап помещается в предел Chrome',
@@ -65,10 +73,24 @@ const measure = (page) =>
   );
   check(
     'в худшем случае видны все строки',
-    widest.delayRow && widest.ownRows >= 3,
+    widest.delayRow && widest.boostRow && widest.ownRows >= 3,
     JSON.stringify(widest)
   );
   await full.close();
+
+  // Предел подъёма уточняет выравнивание: без него подтягивать нечего.
+  const noNormalize = await open(browser, {
+    autoCollapse: true,
+    useNativeSlider: false,
+    normalizeLoudness: false,
+  });
+  const withoutNormalize = await measure(noNormalize);
+  check(
+    'без выравнивания строка предела скрыта',
+    !withoutNormalize.boostRow,
+    JSON.stringify(withoutNormalize)
+  );
+  await noNormalize.close();
 
   // Задержка уточняет автосворачивание: без него строка не нужна.
   const noCollapse = await open(browser, { autoCollapse: false, useNativeSlider: false });
@@ -96,7 +118,11 @@ const measure = (page) =>
 
   // Переключение прямо в попапе тоже должно прятать строку, а не только
   // начальная отрисовка.
-  const live = await open(browser, { autoCollapse: true, useNativeSlider: false });
+  const live = await open(browser, {
+    autoCollapse: true,
+    useNativeSlider: false,
+    normalizeLoudness: true,
+  });
   // Сам <input> накрыт декоративной дорожкой переключателя, поэтому
   // нажимаем на подпись — как это делает пользователь.
   await live.click('label[for="autoCollapse"]');
@@ -106,6 +132,15 @@ const measure = (page) =>
     'выключение автосворачивания прячет строку сразу',
     !afterToggle.delayRow,
     JSON.stringify(afterToggle)
+  );
+
+  await live.click('label[for="normalizeLoudness"]');
+  await live.waitForTimeout(100);
+  const afterNormalize = await measure(live);
+  check(
+    'выключение выравнивания прячет строку предела сразу',
+    !afterNormalize.boostRow,
+    JSON.stringify(afterNormalize)
   );
   await live.close();
 

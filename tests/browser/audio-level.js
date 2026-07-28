@@ -224,11 +224,16 @@ run('audio-level: реальный уровень сигнала на выход
   /**
    * Поднимает страницу, ставит съём выхода и запускает тон.
    * @param {object} spec       ролик: { id, db, drc }
-   * @param {object} options    { amp, volume, normalize }
+   * @param {object} options    { amp, volume, normalize, maxBoostDb }
    */
-  async function playing(spec, { amp = QUIET_AMP, volume = 0.8, normalize = true } = {}) {
+  async function playing(
+    spec,
+    { amp = QUIET_AMP, volume = 0.8, normalize = true, maxBoostDb } = {}
+  ) {
+    const settings = { normalizeLoudness: normalize };
+    if (maxBoostDb !== undefined) settings.maxBoostDb = maxBoostDb;
     const page = await openPage(browser, {
-      withMain: { normalizeLoudness: normalize },
+      withMain: settings,
       // Уровень приходит из хранилища: расширение держит именно его, и
       // любая посторонняя запись в video.volume была бы откачена обратно.
       state: { savedVolume: volume, savedMuted: false },
@@ -406,6 +411,23 @@ run('audio-level: реальный уровень сигнала на выход
       Math.abs(dB(capped.peak, expected)) < 0.2,
       `пик ${show(capped.peak)} против ${show(expected)}`
     );
+
+    // Шесть децибел — значение по умолчанию, а не константа: предел выбирает
+    // пользователь настройкой «Предел подъёма».
+    for (const cap of [3, 10]) {
+      const page = await playing(
+        { id: 'cap' + cap, db: -20 },
+        { amp: QUIET_AMP, volume: 0.8, normalize: true, maxBoostDb: cap }
+      );
+      const measured = await level(page);
+      await page.close();
+      const want = QUIET_AMP * Math.pow(0.8, 3) * boostOf(cap);
+      check(
+        `выбранный предел ${cap}дБ слышен именно как ${cap}дБ`,
+        Math.abs(dB(measured.peak, want)) < 0.2,
+        `пик ${show(measured.peak)} против ${show(want)}`
+      );
+    }
 
     const full = await playing(
       { id: 'headroom', db: -6 },

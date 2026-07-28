@@ -10,6 +10,7 @@ const DEFAULTS = {
   collapseDelay: false,
   useNativeSlider: false,
   normalizeLoudness: false,
+  maxBoostDb: 6,
 };
 
 // Строки живут в _locales. Русский текст остаётся в разметке и здесь как
@@ -17,6 +18,7 @@ const DEFAULTS = {
 // недоступен, пользователь увидит осмысленную подпись, а не пустое место.
 const FALLBACK = {
   curveExample: 'При положении 50% звук будет ≈ $1% от максимума.',
+  maxBoostValue: '$1 дБ',
   saveSaved: 'Сохранено',
   saveSaving: 'Сохраняю…',
   saveError: 'Не удалось сохранить',
@@ -57,6 +59,8 @@ const $showPercent = document.getElementById('showPercent');
 const $autoCollapse = document.getElementById('autoCollapse');
 const $collapseDelay = document.getElementById('collapseDelay');
 const $normalize = document.getElementById('normalizeLoudness');
+const $maxBoost = document.getElementById('maxBoostDb');
+const $maxBoostValue = document.getElementById('maxBoostValue');
 const $saveStatus = document.getElementById('saveStatus');
 const $saveStatusText = document.getElementById('saveStatusText');
 const $reset = document.getElementById('resetSettings');
@@ -71,6 +75,7 @@ const controls = [
   $autoCollapse,
   $collapseDelay,
   $normalize,
+  $maxBoost,
 ];
 
 function setRangeProgress(input) {
@@ -88,10 +93,12 @@ function render() {
   $curveExample.textContent = message('curveExample', String(halfVolume));
   $scaleValue.textContent = `${$scale.value}%`;
   $shortsValue.textContent = `${$shorts.value}%`;
+  $maxBoostValue.textContent = message('maxBoostValue', $maxBoost.value);
 
   setRangeProgress($gamma);
   setRangeProgress($scale);
   setRangeProgress($shorts);
+  setRangeProgress($maxBoost);
 
   for (const row of document.querySelectorAll('.own-only')) {
     row.hidden = $useNative.checked;
@@ -100,6 +107,8 @@ function render() {
   // сворачивать нечего, и строка только занимала бы место.
   document.getElementById('collapseDelayRow').hidden =
     $useNative.checked || !$autoCollapse.checked;
+  // Предел подъёма уточняет выравнивание: без него подтягивать нечего.
+  document.getElementById('maxBoostRow').hidden = !$normalize.checked;
 }
 
 function setControls(settings) {
@@ -112,6 +121,7 @@ function setControls(settings) {
   $autoCollapse.checked = settings.autoCollapse;
   $collapseDelay.checked = settings.collapseDelay;
   $normalize.checked = settings.normalizeLoudness;
+  $maxBoost.value = settings.maxBoostDb;
 }
 
 function values() {
@@ -125,6 +135,7 @@ function values() {
     autoCollapse: $autoCollapse.checked,
     collapseDelay: $collapseDelay.checked,
     normalizeLoudness: $normalize.checked,
+    maxBoostDb: Number($maxBoost.value),
   };
 }
 

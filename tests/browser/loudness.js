@@ -162,9 +162,11 @@ run('loudness: компенсация тихих роликов', async ({ brows
   const { check } = reporter;
 
   // Поднимает страницу с макетом плеера и запущенным тоном.
-  async function play(spec, { normalize = true } = {}) {
+  async function play(spec, { normalize = true, maxBoostDb } = {}) {
+    const settings = { normalizeLoudness: normalize };
+    if (maxBoostDb !== undefined) settings.maxBoostDb = maxBoostDb;
     const page = await openPage(browser, {
-      withMain: { normalizeLoudness: normalize },
+      withMain: settings,
       errors,
       before: async (target) => {
         await target.evaluate(
@@ -263,6 +265,57 @@ run('loudness: компенсация тихих роликов', async ({ brows
     veryQuiet.last !== null && Math.abs(veryQuiet.last - BASE_GAIN * boostOf(6)) < 1e-6,
     `${veryQuiet.last} против потолка ${BASE_GAIN * boostOf(6)}`
   );
+
+  // Потолок — настройка «Предел подъёма». Шесть децибел остаются значением по
+  // умолчанию, но выбирает его пользователь.
+  for (const cap of [1, 3, 10]) {
+    const capped = await measure({ id: 'cap' + cap, db: -20 }, { maxBoostDb: cap });
+    check(
+      `предел подъёма ${cap}дБ соблюдается`,
+      capped.last !== null && Math.abs(capped.last - BASE_GAIN * boostOf(cap)) < 1e-6,
+      `${capped.last} против ${BASE_GAIN * boostOf(cap)}`
+    );
+    check(
+      `  диагностика показывает предел ${cap}дБ`,
+      capped.report && capped.report.maxBoostDb === cap,
+      JSON.stringify(capped.report && capped.report.maxBoostDb)
+    );
+  }
+
+  // Значение приходит из хранилища, то есть может быть каким угодно: чужое
+  // расширение, ручная правка, старая версия настроек.
+  const wild = await measure({ id: 'wild', db: -20 }, { maxBoostDb: 99 });
+  check(
+    'значение вне диапазона подрезается до 10дБ',
+    wild.last !== null && Math.abs(wild.last - BASE_GAIN * boostOf(10)) < 1e-6,
+    `${wild.last} против ${BASE_GAIN * boostOf(10)}`
+  );
+  const negative = await measure({ id: 'neg', db: -20 }, { maxBoostDb: -5 });
+  check(
+    'отрицательный предел подъёма не переворачивает решение',
+    negative.last !== null && Math.abs(negative.last - BASE_GAIN * boostOf(1)) < 1e-6,
+    `${negative.last} против ${BASE_GAIN * boostOf(1)}`
+  );
+
+  // Предел меняют прямо в попапе, при играющем ролике: решение обязано
+  // пересчитаться, а не остаться прежним до следующего перехода.
+  {
+    const page = await play({ id: 'live', db: -20 });
+    await page.waitForTimeout(1200);
+    const before = await page.evaluate(
+      () => window[Symbol.for('ytev.main.instance.v2')].loudness().boostDb
+    );
+    const after = await page.evaluate(() => {
+      window.__update({ normalizeLoudness: true, maxBoostDb: 10 });
+      return window[Symbol.for('ytev.main.instance.v2')].loudness().boostDb;
+    });
+    await page.close();
+    check(
+      'смена предела применяется на лету',
+      Math.abs(before - 6) < 0.01 && Math.abs(after - 10) < 0.01,
+      `${before}дБ → ${after}дБ`
+    );
+  }
 
   // Диагностика должна показывать то же, что реально ушло в усилитель:
   // ею пользователь сверяет наш вывод со «Статистикой для сисадминов».

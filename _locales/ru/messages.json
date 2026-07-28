@@ -82,7 +82,21 @@
     "message": "Выравнивать громкость роликов"
   },
   "normalizeDescription": {
-    "message": "Подтягивать тихие ролики, если «стабильная громкость» YouTube выключена или недоступна"
+    "message": "Подтягивать тихие ролики к общему уровню"
+  },
+  "maxBoostTitle": {
+    "message": "Предел подъёма",
+    "description": "Popup: cap for the loudness boost of quiet videos"
+  },
+  "maxBoostValue": {
+    "message": "$DB$ дБ",
+    "description": "Popup: current boost limit, in decibels",
+    "placeholders": {
+      "db": {
+        "content": "$1",
+        "example": "6"
+      }
+    }
   },
   "saveSaved": {
     "message": "Сохранено"

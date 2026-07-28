@@ -44,6 +44,9 @@ const ids = [
   'collapseDelay',
   'collapseDelayRow',
   'normalizeLoudness',
+  'maxBoostDb',
+  'maxBoostValue',
+  'maxBoostRow',
   'saveStatus',
   'saveStatusText',
   'resetSettings',
@@ -55,6 +58,8 @@ elements.get('sliderScale').min = '2';
 elements.get('sliderScale').max = '70';
 elements.get('shortsScale').min = '2';
 elements.get('shortsScale').max = '70';
+elements.get('maxBoostDb').min = '1';
+elements.get('maxBoostDb').max = '10';
 const windowListeners = new Map();
 const writes = [];
 
