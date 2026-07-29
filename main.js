@@ -306,6 +306,17 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
           muted: typeof preferredMuted === 'boolean' ? preferredMuted : null,
           enabled: SETTINGS.enabled,
           gamma: SETTINGS.gamma,
+          normalizeLoudness: SETTINGS.normalizeLoudness,
+          maxBoostDb: SETTINGS.maxBoostDb,
+          loudness:
+            loudnessCacheId && Number.isFinite(loudnessBoost)
+              ? {
+                  videoId: loudnessCacheId,
+                  trackId: loudnessCacheTrackId,
+                  trackItag: loudnessCacheTrackItag,
+                  boostDb: Number((20 * Math.log10(loudnessBoost)).toFixed(3)),
+                }
+              : null,
         })
       );
     } catch {}
@@ -796,6 +807,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   ];
   let loudnessBoost = 1;
   let loudnessKey = '';
+  let loudnessCacheId = '';
+  let loudnessCacheTrackId = '';
+  let loudnessCacheTrackItag = null;
   let youtubeNormalizationPending = false;
   let youtubeNormalizationApiAvailable = false;
   let youtubeNormalizationForcedOff = false;
@@ -884,20 +898,69 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
    * равно возвращается в 0. Под сомнением здесь только память о выборе
    * пользователя, и в сомнительном случае она просто не меняется.
    * ---------------------------------------------------------------------- */
-  const DRC_INTENT_WINDOW_MS = 2000;
-  let lastTrustedInputAt = 0;
-  for (const type of ['pointerdown', 'keydown']) {
-    on(
-      document,
-      type,
-      (e) => {
-        if (e.isTrusted) lastTrustedInputAt = Date.now();
-      },
-      true
-    );
+  const DRC_INTENT_WINDOW_MS = 750;
+  let pendingDrcIntent = null;
+
+  function drcToggleFromEvent(event) {
+    if (!event || event.isTrusted !== true) return null;
+    let path = [];
+    try {
+      path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    } catch {
+      return null;
+    }
+    for (const node of path) {
+      if (
+        !(node instanceof Element) ||
+        !node.classList.contains('ytp-drc-menu-item') ||
+        node.getAttribute('role') !== 'menuitemcheckbox'
+      ) {
+        continue;
+      }
+      const player = node.closest('.html5-video-player, #movie_player, #shorts-player');
+      if (!player || player !== getPlayer()) return null;
+      return {
+        player,
+        // aria-checked описывает состояние ДО штатного обработчика YouTube.
+        requested: node.getAttribute('aria-checked') === 'true' ? 0 : 1,
+      };
+    }
+    return null;
   }
-  const hasRecentTrustedInput = () =>
-    lastTrustedInputAt > 0 && Date.now() - lastTrustedInputAt <= DRC_INTENT_WINDOW_MS;
+
+  function armDrcIntent(event) {
+    if (
+      event.type === 'keydown' &&
+      event.key !== 'Enter' &&
+      event.key !== ' ' &&
+      event.key !== 'Spacebar'
+    ) {
+      return;
+    }
+    const toggle = drcToggleFromEvent(event);
+    if (!toggle) return;
+    pendingDrcIntent = {
+      ...toggle,
+      expiresAt: Date.now() + DRC_INTENT_WINDOW_MS,
+    };
+  }
+
+  on(document, 'click', armDrcIntent, true);
+  on(document, 'keydown', armDrcIntent, true);
+
+  function consumeDrcIntent(player, requested) {
+    const intent = pendingDrcIntent;
+    if (!intent) return false;
+    if (Date.now() > intent.expiresAt) {
+      pendingDrcIntent = null;
+      return false;
+    }
+    // Несовпадающий вызов не должен отнять подтверждённое нажатие у самого
+    // переключателя. Разрешение расходуется только точным совпадением.
+    if (intent.player !== player || intent.requested !== requested) return false;
+    pendingDrcIntent = null;
+    return true;
+  }
 
   /**
    * YouTube не публикует событие изменения Stable Volume. Штатный переключатель
@@ -927,10 +990,12 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       const requested = Number(value) === 1 ? 1 : 0;
       if (!SETTINGS.normalizeLoudness) return original.call(this, value, ...rest);
 
-      // Без свежего доверенного ввода это не выбор пользователя, а чужой
-      // вызов: предпочтение всё равно вернём в 0, но память о выборе
-      // не трогаем.
-      if (hasRecentTrustedInput()) rememberYouTubeDrcUserIntent(requested === 1);
+      // Намерение выдаётся только настоящим нажатием непосредственно на
+      // переключатель Stable Volume активного плеера. Любой другой клик,
+      // клавиша или программный вызов setter память о выборе не меняют.
+      if (consumeDrcIntent(player, requested)) {
+        rememberYouTubeDrcUserIntent(requested === 1);
+      }
       const result = original.call(this, 0, ...rest);
       youtubeNormalizationGeneration += 1;
       youtubeNormalizationPending = false;
@@ -1345,6 +1410,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   // Смена ролика: прежнее решение больше не действует, а нового ещё нет.
   function resetLoudness() {
     loudnessKey = '';
+    loudnessCacheId = '';
+    loudnessCacheTrackId = '';
+    loudnessCacheTrackItag = null;
     setLoudnessBoost(1);
   }
 
@@ -1368,16 +1436,48 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     return next.id;
   }
 
+  function playerForRevisionVideo(video) {
+    if (!video || typeof video.closest !== 'function') return null;
+    const candidates = [
+      video.closest('.html5-video-player'),
+      video.closest('#shorts-player'),
+      video.closest('#movie_player'),
+      video.closest('ytd-reel-video-renderer'),
+    ];
+    return (
+      candidates.find(
+        (candidate) =>
+          candidate &&
+          (typeof candidate.getVideoData === 'function' ||
+            typeof candidate.getPlayerResponse === 'function')
+      ) ||
+      candidates.find(Boolean) ||
+      null
+    );
+  }
+
   /**
    * В Shorts один плеер и один <video> переезжают между роликами, поэтому
    * идентичности DOM-узлов недостаточно. В Watch YouTube тоже иногда повторно
    * использует их, но video_id и currentSrc обновляются в другой момент.
-   * Поверхность входит в ключ намеренно: переход Shorts ↔ Watch всегда новая
-   * ревизия, даже если экспериментальная сборка сохранила оба узла.
+   * URL намеренно не входит в ключ: при Shorts → Home адрес меняется раньше,
+   * чем перестаёт звучать старое видео. Реальная смена определяется плеером,
+   * <video>, video_id и currentSrc — именно они описывают источник звука.
    */
   function currentMediaRevision() {
-    const player = getPlayer();
-    const video = getVideo();
+    const selectedPlayer = getPlayer();
+    const selectedVideo = selectedPlayer ? selectedPlayer.querySelector('video') : null;
+    // Во время Shorts → Home новый плеер ещё не выбран, но прежний <video>
+    // продолжает играть. URL уже не Shorts, поэтому getPlayer() возвращает
+    // null; держимся за фактически звучащий boundVideo до его остановки.
+    const keepPlayingBound =
+      boundVideo &&
+      !boundVideo.paused &&
+      !boundVideo.ended &&
+      (!selectedVideo || selectedVideo === boundVideo || selectedVideo.paused);
+    const video = keepPlayingBound ? boundVideo : selectedVideo;
+    const player =
+      keepPlayingBound ? playerForRevisionVideo(boundVideo) || selectedPlayer : selectedPlayer;
     const data = callPlayer(player, 'getVideoData');
     let id = data && typeof data === 'object' ? String(data.video_id || '') : '';
     const shorts = location.pathname.startsWith('/shorts/');
@@ -1387,9 +1487,9 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         id = new URL(location.href).searchParams.get('v') || '';
       } catch {}
     }
-    return `${shorts ? 'shorts' : 'watch'}|p${mediaObjectId(player)}|v${mediaObjectId(
+    return `p${mediaObjectId(player)}|v${mediaObjectId(video)}|${id}|s${mediaSourceId(
       video
-    )}|${id}|s${mediaSourceId(video)}`;
+    )}`;
   }
 
   function beginMediaRevision() {
@@ -1435,7 +1535,13 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     }`;
     if (key === loudnessKey) return true;
     loudnessKey = key;
+    loudnessCacheId = snap.id;
+    loudnessCacheTrackId = snap.trackId || '';
+    loudnessCacheTrackItag = snap.trackItag == null ? null : snap.trackItag;
     setLoudnessBoost(Math.pow(10, loudnessDbFor(snap) / 20));
+    // document_start-preload прочитает это на следующей полной загрузке и
+    // применит проверенный уровень именно к тому же video_id ещё до play().
+    cachePreferredState();
     return true;
   }
 
@@ -1815,9 +1921,12 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       preloadState = null;
     }
     cachePreferredState();
+    bindVideo();
+    // bindVideo() начинает новую ревизию и потому снимает старое усиление.
+    // Пересчитываем после привязки синхронно: иначе первый ролик успевал
+    // прозвучать с 0 дБ до отложенного media-события.
     refreshLoudness(); // сам позовёт reapplyCurve, если компенсация изменилась
     reapplyCurve();
-    bindVideo();
     ensureUI(); // включение/выключение своей шкалы должно срабатывать сразу
     layout();
     updateUI();
@@ -2332,7 +2441,21 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   }
   const getVideo = () => {
     const p = getPlayer();
-    return p ? p.querySelector('video') : null;
+    const selected = p ? p.querySelector('video') : null;
+    // Во время Shorts → Home YouTube заранее создаёт скрытый остановленный
+    // #movie_player, но прежний Shorts ещё несколько секунд звучит. Пока
+    // новый кандидат не начал воспроизведение, активным остаётся фактически
+    // играющий boundVideo — иначе DOM-sweep перепривяжется к заготовке и
+    // снимет нормализацию со старого звука.
+    if (
+      boundVideo &&
+      !boundVideo.paused &&
+      !boundVideo.ended &&
+      (!selected || selected === boundVideo || selected.paused)
+    ) {
+      return boundVideo;
+    }
+    return selected;
   };
 
   const fmt = (pct) => (pct > 0 && pct < 10 ? pct.toFixed(1) : Math.round(pct)) + '%';
@@ -3735,8 +3858,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     domObserver.observe(document.documentElement, { childList: true, subtree: true });
   }
   const prepareForNavigation = () => {
-    // Переход — самый ранний сигнал смены ролика, раньше нового <video>.
-    resetLoudness();
+    // yt-navigate-start означает лишь начало SPA-перехода. При Shorts → Home
+    // старый ролик продолжает играть до готовности страницы, поэтому его
+    // проверенное усиление сохраняем. Сброс выполнит beginMediaRevision(),
+    // когда действительно изменятся video_id, currentSrc или сам плеер.
     completeMediaRevision = '';
     if (!SETTINGS.useNativeSlider) {
       setEarlyNativeHidden(true);

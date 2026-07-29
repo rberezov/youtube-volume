@@ -8,9 +8,10 @@
   const CHANNEL_PATTERN = /^[a-f0-9]{32}$/;
   const SECRET_PATTERN = /^[a-f0-9]{64}$/;
   // localStorage принадлежит странице YouTube и не является доверенным
-  // хранилищем. До прихода состояния из chrome.storage ранний кэш может
-  // только приглушить звук до безопасного потолка, но не дать полный уровень.
+  // хранилищем. До прихода состояния из chrome.storage любой ранний результат
+  // (включая кэш нормализации) ограничивается этим безопасным потолком.
   const EARLY_SAFE_VOLUME_LIMIT = 0.5;
+  const MAX_BOOST_LIMIT_DB = 15;
   // Окно доверия держим таким же коротким, как в bridge.js: за это время
   // YouTube успевает применить жест, а лишние секунды только расширяют
   // промежуток, в который может вклиниться скрипт страницы.
@@ -149,6 +150,15 @@
   const gamma = Number.isFinite(cachedGamma)
     ? Math.min(6, Math.max(1, cachedGamma))
     : 3;
+  const normalizeLoudness = cached && cached.normalizeLoudness === true;
+  const cachedMaxBoostDb = Number(cached && cached.maxBoostDb);
+  const maxBoostDb = Number.isFinite(cachedMaxBoostDb)
+    ? Math.min(MAX_BOOST_LIMIT_DB, Math.max(1, cachedMaxBoostDb))
+    : 6;
+  const cachedLoudness =
+    cached && cached.loudness && typeof cached.loudness === 'object'
+      ? cached.loudness
+      : null;
   let heldVolume = volume;
   let volumeDirty = false;
   let volumeIntentUntil = 0;
@@ -158,6 +168,7 @@
   let expectedVolume;
   const shouldMute = cached && cached.muted === true;
   const logicalVolume = new WeakMap();
+  const earlyLoudnessBoost = new WeakMap();
   let active = true;
 
   const closest = (target, selector) =>
@@ -190,6 +201,204 @@
   };
   const mediaSource = (media) =>
     media ? String(media.currentSrc || media.src || '') : '';
+
+  const playerForMedia = (media) =>
+    closest(media, '.html5-video-player, #movie_player, #shorts-player') ||
+    document.querySelector(
+      'ytd-reel-video-renderer[is-active] .html5-video-player, #shorts-player .html5-video-player, #movie_player'
+    );
+  const callPlayer = (player, method) => {
+    if (!player || typeof player[method] !== 'function') return undefined;
+    try {
+      return player[method]();
+    } catch {
+      return undefined;
+    }
+  };
+  const locationVideoId = () => {
+    if (typeof location !== 'object' || !location) return '';
+    const path = String(location.pathname || '');
+    if (path.startsWith('/shorts/')) return path.split('/')[2] || '';
+    const match = /(?:^|[?&])v=([^&]+)/.exec(String(location.search || ''));
+    return match ? decodeURIComponent(match[1]) : '';
+  };
+  const currentVideoId = (player, response) => {
+    const data = callPlayer(player, 'getVideoData');
+    if (data && typeof data === 'object' && data.video_id) {
+      return String(data.video_id);
+    }
+    const details = response && response.videoDetails;
+    return details && details.videoId
+      ? String(details.videoId)
+      : locationVideoId();
+  };
+
+  // Ранний путь использует ту же осторожную привязку к активной
+  // аудиодорожке, что и основной код. На мультиязычном ролике общий
+  // audioConfig может относиться к оригиналу, пока играет перевод.
+  function activeAudioTrack(player, formats) {
+    const trackIds = new Set();
+    const itags = new Set();
+    for (const format of formats) {
+      const track = format && format.audioTrack;
+      if (track && track.id != null) trackIds.add(String(track.id));
+      const itag = Number(format && format.itag);
+      if (Number.isInteger(itag) && itag > 0) itags.add(itag);
+    }
+    if (!trackIds.size) return { id: '', itag: null, count: 0 };
+
+    const selected = callPlayer(player, 'getAudioTrack');
+    const matchedIds = new Set();
+    const matchedItags = new Set();
+    if (selected && (typeof selected === 'object' || typeof selected === 'function')) {
+      const seen = new Set();
+      const pending = [{ value: selected, depth: 0 }];
+      let inspected = 0;
+      while (pending.length && inspected < 64) {
+        const item = pending.pop();
+        const value = item.value;
+        if (
+          !value ||
+          (typeof value !== 'object' && typeof value !== 'function') ||
+          seen.has(value)
+        ) {
+          continue;
+        }
+        seen.add(value);
+        inspected += 1;
+        for (const name of Object.getOwnPropertyNames(value).slice(0, 64)) {
+          let child;
+          try {
+            child = value[name];
+          } catch {
+            continue;
+          }
+          if (name === 'id' && typeof child === 'string') {
+            if (trackIds.has(child)) matchedIds.add(child);
+            const itagMatch = /^(\d+);/.exec(child);
+            const itag = itagMatch ? Number(itagMatch[1]) : NaN;
+            if (Number.isInteger(itag) && itags.has(itag)) matchedItags.add(itag);
+          }
+          if (
+            item.depth < 4 &&
+            child &&
+            (typeof child === 'object' || typeof child === 'function')
+          ) {
+            pending.push({ value: child, depth: item.depth + 1 });
+          }
+        }
+      }
+    }
+    return {
+      id:
+        matchedIds.size === 1
+          ? matchedIds.values().next().value
+          : trackIds.size === 1
+            ? trackIds.values().next().value
+            : '',
+      itag: matchedItags.size === 1 ? matchedItags.values().next().value : null,
+      count: trackIds.size,
+    };
+  }
+
+  function activeTrackLoudness(formats, track) {
+    if (!track.id) return NaN;
+    const values = [];
+    for (const format of formats) {
+      const audioTrack = format && format.audioTrack;
+      if (!audioTrack || String(audioTrack.id || '') !== track.id) continue;
+      if (track.itag != null && Number(format.itag) !== track.itag) continue;
+      if (format.isDrc === true || format.isVb === true) continue;
+      const value =
+        format.loudnessDb == null || format.loudnessDb === ''
+          ? NaN
+          : Number(format.loudnessDb);
+      if (Number.isFinite(value)) values.push(value);
+    }
+    if (!values.length || Math.max(...values) - Math.min(...values) >= 0.15) {
+      return NaN;
+    }
+    return values.reduce((sum, value) => sum + value, 0) / values.length;
+  }
+
+  function cachedBoostDbFor(videoId, track) {
+    if (!normalizeLoudness || !cachedLoudness) return NaN;
+    if (String(cachedLoudness.videoId || '') !== videoId) return NaN;
+    const cachedTrackId = String(cachedLoudness.trackId || '');
+    if (cachedTrackId) {
+      if (track.id !== cachedTrackId) return NaN;
+      const cachedItag =
+        cachedLoudness.trackItag == null ? NaN : Number(cachedLoudness.trackItag);
+      if (
+        Number.isInteger(cachedItag) &&
+        track.itag != null &&
+        cachedItag !== track.itag
+      ) {
+        return NaN;
+      }
+    } else if (track.count > 1) {
+      return NaN;
+    }
+    const db = Number(cachedLoudness.boostDb);
+    return Number.isFinite(db) && db <= maxBoostDb && db >= -60 ? db : NaN;
+  }
+
+  function refreshEarlyLoudness(media) {
+    if (!normalizeLoudness || !(media instanceof HTMLMediaElement)) return;
+    const selectedMedia = activeVideo();
+    if (selectedMedia && media !== selectedMedia) return;
+    const player = playerForMedia(media);
+    if (!player || typeof player.getPlayerResponse !== 'function') return;
+    try {
+      const response = player.getPlayerResponse();
+      if (!response) return;
+      const videoId = currentVideoId(player, response);
+      const expectedId = locationVideoId();
+      const snapshotId =
+        response.videoDetails && response.videoDetails.videoId
+          ? String(response.videoDetails.videoId)
+          : '';
+      if (
+        !videoId ||
+        (expectedId && videoId !== expectedId) ||
+        (snapshotId && snapshotId !== videoId)
+      ) {
+        return;
+      }
+
+      const state = Number(callPlayer(player, 'getDrcState'));
+      const preference = Number(callPlayer(player, 'getDrcUserPreference'));
+      // Активный DRC уже нормализован самим YouTube; неизвестное состояние
+      // тоже не усиливаем. Preference 0 подтверждает исходную дорожку даже
+      // на сборках, где getDrcState после переключения залипает на нуле.
+      if (state === 0 && preference === 1) {
+        earlyLoudnessBoost.set(media, 1);
+        return;
+      }
+      if (!(state === 1 || preference === 0)) return;
+
+      const formats =
+        response.streamingData && Array.isArray(response.streamingData.adaptiveFormats)
+          ? response.streamingData.adaptiveFormats
+          : [];
+      const track = activeAudioTrack(player, formats);
+      let boostDb = cachedBoostDbFor(videoId, track);
+      if (!Number.isFinite(boostDb)) {
+        const trackDb = activeTrackLoudness(formats, track);
+        const config = response.playerConfig && response.playerConfig.audioConfig;
+        const configDb =
+          config && config.loudnessDb != null ? Number(config.loudnessDb) : NaN;
+        const db = Number.isFinite(trackDb)
+          ? trackDb
+          : track.count <= 1
+            ? configDb
+            : NaN;
+        if (!Number.isFinite(db)) return;
+        boostDb = db > 0 ? -db : Math.min(maxBoostDb, -db);
+      }
+      earlyLoudnessBoost.set(media, Math.pow(10, boostDb / 20));
+    } catch {}
+  }
 
   // То же, что видит пользователь: положение штатного ползунка Shorts или
   // проценты на панели обычного плеера. Читать video.volume для сверки
@@ -252,13 +461,16 @@
     return corroborated(requested) ? 'trusted' : 'hold';
   };
 
-  const outputVolume = () =>
-    enabled ? Math.pow(heldVolume, gamma) : heldVolume;
+  const outputVolume = (media) => {
+    const base = enabled ? Math.pow(heldVolume, gamma) : heldVolume;
+    const boost = earlyLoudnessBoost.get(media) || 1;
+    return Math.min(EARLY_SAFE_VOLUME_LIMIT, Math.max(0, base * boost));
+  };
 
   const applyCachedOutput = (media) => {
     if (!active || !(media instanceof HTMLMediaElement)) return;
     try {
-      nativeVolume.set.call(media, outputVolume());
+      nativeVolume.set.call(media, outputVolume(media));
       // Включать mute заранее безопасно. Снимать его до основного кода
       // нельзя: на новой вкладке это может нарушить политику autoplay.
       if (shouldMute) nativeMuted.set.call(media, true);
@@ -298,6 +510,7 @@
   }
 
   const earlyPlay = function (...args) {
+    refreshEarlyLoudness(this);
     applyCachedOutput(this);
     return nativePlay.apply(this, args);
   };
@@ -349,17 +562,29 @@
   window.addEventListener('keydown', onKeyDown, true);
   window.addEventListener('input', onNativeInput, true);
 
-  const onMediaReady = (event) => applyCachedOutput(event.target);
+  const onMediaReady = (event) => {
+    refreshEarlyLoudness(event.target);
+    applyCachedOutput(event.target);
+  };
   for (const type of ['loadstart', 'loadedmetadata', 'play']) {
     document.addEventListener(type, onMediaReady, true);
   }
 
   const applyTree = (node) => {
     if (!(node instanceof Element)) return;
-    if (node instanceof HTMLMediaElement) applyCachedOutput(node);
-    node.querySelectorAll('video, audio').forEach(applyCachedOutput);
+    if (node instanceof HTMLMediaElement) {
+      refreshEarlyLoudness(node);
+      applyCachedOutput(node);
+    }
+    node.querySelectorAll('video, audio').forEach((media) => {
+      refreshEarlyLoudness(media);
+      applyCachedOutput(media);
+    });
   };
-  document.querySelectorAll('video, audio').forEach(applyCachedOutput);
+  document.querySelectorAll('video, audio').forEach((media) => {
+    refreshEarlyLoudness(media);
+    applyCachedOutput(media);
+  });
   const observer = new MutationObserver((records) => {
     for (const record of records) {
       for (const node of record.addedNodes) applyTree(node);

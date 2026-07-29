@@ -88,14 +88,26 @@ for (const [id, value] of [
   );
 }
 
-// Версия объявлена в манифесте и в package.json; сборщик пакета откажется
-// работать при расхождении, но поймать его лучше на тестах, а не при выкладке.
+// Версия объявлена в манифесте, package.json и двух местах package-lock.json;
+// сборщик пакета откажется работать при части расхождений, но поймать их
+// лучше на тестах, а не при выкладке.
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+const lock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
 assert.equal(
   manifest.version,
   pkg.version,
   `версии разошлись: manifest.json ${manifest.version}, package.json ${pkg.version}`
+);
+assert.equal(
+  lock.version,
+  pkg.version,
+  `версии разошлись: package-lock.json ${lock.version}, package.json ${pkg.version}`
+);
+assert.equal(
+  lock.packages && lock.packages[''] && lock.packages[''].version,
+  pkg.version,
+  `версия корневого пакета в package-lock.json не равна ${pkg.version}`
 );
 
 // Файлы, которые перечислены в манифесте, обязаны существовать: опечатка в
