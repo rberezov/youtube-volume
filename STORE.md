@@ -50,8 +50,8 @@
 ПРИВАТНОСТЬ
 
 Расширение не собирает данные и не делает сетевых запросов вообще. Хранятся
-только ваши настройки и последний уровень громкости — в браузере. Исходный код
-открыт.
+только ваши настройки, последний уровень громкости и технический кэш громкости
+текущего ролика — всё в браузере. Исходный код открыт.
 ```
 
 ---
@@ -102,8 +102,8 @@ WHAT ELSE
 PRIVACY
 
 The extension collects no data and makes no network requests at all. Only your
-settings and the last volume level are stored, in your browser. The source code
-is open.
+settings, the last volume level and a technical cache of the current video's
+loudness are stored, in your browser. The source code is open.
 ```
 
 ---
