@@ -653,9 +653,9 @@ run('loudness: компенсация тихих роликов', async ({ brows
           drcState: 1,
           preference: 0,
         },
-        // Сохранённое состояние передаём явно: без него срабатывает миграция
-        // с 1.31.0 («нормализация включена — значит DRC выключили мы»), и
-        // флаг восстановления поднимается сам, ещё до всяких вызовов.
+        // Отправная точка задаётся явно: «пользователь держал Stable Volume
+        // выключенной». Тогда любое появление флага восстановления —
+        // результат вызова, а не наследство прежнего состояния.
         { state: { restoreYoutubeDrc: false } }
       );
       await quiet.waitForTimeout(1200);
@@ -787,27 +787,36 @@ run('loudness: компенсация тихих роликов', async ({ brows
       JSON.stringify(stayedOff)
     );
 
-    const migratedPage = await play({
-      id: 'legacy-guard-migration',
+    // Тот же ролик и то же состояние плеера, что и выше, но **без** записи о
+    // прежнем выборе пользователя. Раньше здесь работала миграция с 1.31.0:
+    // отсутствие записи при включённой нормализации считалось «Stable Volume
+    // выключили мы», и расширение включало её обратно. Условие оказалось
+    // шире замысла — записи нет и на новой установке, и после очистки
+    // хранилища, и в соседней вкладке, открытой раньше синхронизации, — так
+    // что расширение включало настройку тем, кто держал её выключенной сам.
+    // Отличить эти случаи в этот момент нечем, поэтому проверка сменила
+    // направление: без доказательства расширение чужой выбор не трогает.
+    const unknownPage = await play({
+      id: 'unknown-previous-state',
       db: -12.7,
       offersDrc: true,
       drcState: 0,
       drcNow: true,
       preference: 0,
     });
-    await migratedPage.waitForTimeout(200);
-    await migratedPage.evaluate(() => {
+    await unknownPage.waitForTimeout(200);
+    await unknownPage.evaluate(() => {
       window.__update({ normalizeLoudness: false });
     });
-    await migratedPage.waitForTimeout(200);
-    const migrated = await readAll(migratedPage);
-    await migratedPage.close();
+    await unknownPage.waitForTimeout(200);
+    const unknown = await readAll(unknownPage);
+    await unknownPage.close();
     check(
-      'после обновления с 1.31.0 ранее отключённая расширением DRC возвращается',
-      migrated.drcPreferenceCalls.includes(1) &&
-        migrated.report.preference === 1 &&
-        migrated.report.youtubeDrcRestoreNeeded === false,
-      JSON.stringify(migrated)
+      'без записи о прежнем выборе Stable Volume не включается',
+      !unknown.drcPreferenceCalls.includes(1) &&
+        unknown.report.preference === 0 &&
+        unknown.report.youtubeDrcRestoreNeeded === false,
+      JSON.stringify(unknown)
     );
 
     const recoveredPage = await play(
