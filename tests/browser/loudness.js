@@ -678,19 +678,64 @@ run('loudness: компенсация тихих роликов', async ({ brows
         JSON.stringify(forged.preference)
       );
 
-      // То же самое сразу после настоящего нажатия — так это и выглядит,
-      // когда человек щёлкает переключатель в меню YouTube.
+      // Обычное настоящее нажатие тоже не является доказательством выбора
+      // Stable Volume: страница может дождаться любого клика и сразу вызвать
+      // setter. Именно этот сценарий прежнее двухсекундное окно пропускало.
       await quiet.mouse.click(2, 2);
-      const genuine = await quiet.evaluate(() => {
+      const afterUnrelatedClick = await quiet.evaluate(() => {
         document.getElementById('movie_player').setDrcUserPreference(1);
         return {
           preference: window.__pref,
           report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
         };
       });
+      check(
+        'обычный доверенный клик не разрешает чужой вызов',
+        afterUnrelatedClick.report.youtubeDrcRestoreNeeded === false &&
+          afterUnrelatedClick.preference === 0,
+        JSON.stringify(afterUnrelatedClick)
+      );
+
+      // Программный click() по похожему на настоящий элементу тоже не даёт
+      // разрешение: его событие имеет isTrusted=false.
+      const scriptedClick = await quiet.evaluate(() => {
+        const player = document.getElementById('movie_player');
+        const toggle = document.createElement('div');
+        toggle.className = 'ytp-menuitem ytp-drc-menu-item';
+        toggle.setAttribute('role', 'menuitemcheckbox');
+        toggle.setAttribute('aria-checked', 'false');
+        toggle.textContent = 'Stable volume';
+        toggle.style.cssText =
+          'position:absolute;left:10px;top:10px;width:180px;height:40px;z-index:9999';
+        toggle.addEventListener('click', () => {
+          player.setDrcUserPreference(1);
+        });
+        player.appendChild(toggle);
+        window.__drcToggle = toggle;
+        toggle.click();
+        return {
+          preference: window.__pref,
+          report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
+        };
+      });
+      check(
+        'программный click по переключателю не считается пользовательским',
+        scriptedClick.report.youtubeDrcRestoreNeeded === false &&
+          scriptedClick.preference === 0,
+        JSON.stringify(scriptedClick)
+      );
+
+      // А настоящее нажатие именно по штатному переключателю даёт одноразовое
+      // разрешение и сохраняет желание пользователя включить Stable Volume.
+      await quiet.locator('.ytp-drc-menu-item').click();
+      const genuine = await quiet.evaluate(() => ({
+        preference: window.__pref,
+        calls: window.__drcPreferenceCalls.slice(),
+        report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
+      }));
       await quiet.close();
       check(
-        'после доверенного нажатия тот же вызов запоминается',
+        'нажатие самого переключателя запоминается',
         genuine.report.youtubeDrcRestoreNeeded === true && genuine.preference === 0,
         JSON.stringify(genuine)
       );
@@ -874,6 +919,44 @@ run('loudness: компенсация тихих роликов', async ({ brows
       'поздняя статистика: решение сразу взято у плеера',
       report.drc === true && report.boostDb === 0 && report.source === 'drcState',
       JSON.stringify(report)
+    );
+  }
+
+  // yt-navigate-start сообщает только о начале SPA-перехода. При уходе из
+  // Shorts на Home старое видео ещё звучит, пока загружается новая страница:
+  // снимать его уже проверенное усиление в этот момент рано.
+  {
+    const page = await play(
+      { id: 'shorts-to-home', db: -6, preference: 0, drcState: 1 },
+      { page: 'shorts' }
+    );
+    await page.waitForTimeout(1200);
+    const duringNavigation = await page.evaluate(async () => {
+      const video = document.querySelector('video');
+      // Home заранее приносит отдельный остановленный #movie_player.
+      // MutationObserver видит его до завершения перехода.
+      const nextPlayer = document.createElement('div');
+      nextPlayer.id = 'movie_player';
+      nextPlayer.appendChild(document.createElement('video'));
+      document.body.appendChild(nextPlayer);
+      document.dispatchEvent(new Event('yt-navigate-start'));
+      // В настоящем YouTube URL становится Home раньше остановки старого
+      // Shorts. Затем yt-player-updated просит пересчитать медиаревизию, хотя
+      // player, <video>, video_id и currentSrc всё ещё прежние.
+      history.pushState({}, '', '/');
+      document.dispatchEvent(new Event('yt-player-updated'));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return {
+        paused: video.paused,
+        report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
+      };
+    });
+    await page.close();
+    check(
+      'Shorts → Home: играющий старый ролик сохраняет нормализацию',
+      duringNavigation.paused === false &&
+        Math.abs(duringNavigation.report.boostDb - 6) < 0.01,
+      JSON.stringify(duringNavigation)
     );
   }
 
