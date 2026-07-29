@@ -24,6 +24,7 @@ const HARNESSES = [
   'loudness.js',
   'audio-level.js',
   'hotkeys.js',
+  'drc-sync.js',
 ];
 
 const only = process.argv.slice(2);

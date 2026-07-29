@@ -7,6 +7,9 @@ const vm = require('node:vm');
 let onMessage;
 const injections = [];
 const localWrites = [];
+// Состояние chrome.storage.local между вызовами: нужно, чтобы отличить
+// «записали изменение» от «записали то же самое ещё раз».
+const localStored = {};
 const mainFunction = function youtubeVolumeMain() {};
 
 const chromeMock = {
@@ -37,10 +40,11 @@ const chromeMock = {
     },
     local: {
       get(defaults, callback) {
-        callback({ ...defaults, savedVolume: 0.42, savedMuted: false });
+        callback({ ...defaults, savedVolume: 0.42, savedMuted: false, ...localStored });
       },
       set(value, callback) {
         localWrites.push(value);
+        Object.assign(localStored, value);
         callback();
       },
     },
@@ -187,6 +191,22 @@ async function run() {
   assert.equal(injections[2].args[0], secret);
   assert.equal(localWrites.length, 1);
   assert.equal(localWrites[0].restoreYoutubeDrc, true);
+
+  // Перечитать состояние может попросить и скрипт страницы: сигнал намеренно
+  // не требует секрета. Значит повтор с тем же значением не должен доходить
+  // до хранилища — иначе поток чужих просьб изнашивал бы диск.
+  let repeatResponse;
+  onMessage({ type: 'YTEV_SYNC_DRC_STATE', channel, secret }, sender, (value) => {
+    repeatResponse = value;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(repeatResponse.ok, true, 'повторная синхронизация должна отвечать успехом');
+  assert.equal(
+    localWrites.length,
+    1,
+    'повтор с тем же значением не должен писать в хранилище'
+  );
 
   const manifest = JSON.parse(
     fs.readFileSync(require.resolve('../manifest.json'), 'utf8')

@@ -142,6 +142,11 @@ async function syncDrcState(sender, secret) {
     (result) => result && typeof result.result === 'boolean'
   );
   if (!state) return false;
+  // Пишем только изменение. Перечитать состояние может попросить и скрипт
+  // страницы — сигнал намеренно не требует секрета, — так что безусловная
+  // запись означала бы износ хранилища по чужой команде.
+  const stored = await storageGet('local', { restoreYoutubeDrc: null });
+  if (stored.restoreYoutubeDrc === state.result) return true;
   await storageSet('local', { restoreYoutubeDrc: state.result });
   return true;
 }

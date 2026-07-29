@@ -42,6 +42,7 @@
   let lastWriteAt = 0;
   let drcSyncTimer = 0;
   let drcSyncRetries = 0;
+  let drcSyncLastAt = 0;
 
   // Читаем только один безопасный UI-флаг прямо из chrome.storage: для этого
   // не нужно будить service worker. На document_start правило успевает встать
@@ -510,11 +511,24 @@
     writeTimer = setTimeout(flushWrite, delay);
   }
 
+  // Сигнал YTEV_DRC_STATE_DIRTY приходит от страницы и намеренно не требует
+  // секрета: подделка способна лишь попросить перечитать состояние из
+  // доверенного экземпляра. Но просьба не бесплатна — каждая будит service
+  // worker, внедряет скрипт в MAIN-мир и пишет в хранилище. Замер показал
+  // ровно то, чего опасались: 50 сообщений страницы давали 50 обращений,
+  // ограничитель держал только одновременность, но не частоту. Минимальный
+  // интервал делает поток безобидным, а настоящий сигнал теряться не может:
+  // он лишь ждёт своей очереди.
+  const DRC_SYNC_MIN_INTERVAL_MS = 1000;
+
   function scheduleDrcStateSync(delay = 0) {
     if (!alive() || drcSyncTimer) return;
+    const since = Date.now() - drcSyncLastAt;
+    const wait = Math.max(delay, drcSyncLastAt ? DRC_SYNC_MIN_INTERVAL_MS - since : 0);
     drcSyncTimer = -1;
     const timer = setTimeout(() => {
       drcSyncTimer = 0;
+      drcSyncLastAt = Date.now();
       try {
         chrome.runtime.sendMessage(
           {
@@ -533,7 +547,7 @@
           }
         );
       } catch {}
-    }, delay);
+    }, wait > 0 ? wait : 0);
     // Не перезаписываем 0, если тестовая/нестандартная реализация таймера
     // вызвала callback синхронно.
     if (drcSyncTimer === -1) drcSyncTimer = timer;
