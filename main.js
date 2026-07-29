@@ -866,6 +866,39 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     return true;
   }
 
+  /* ---- Доверие к чужому переключателю Stable Volume --------------------- *
+   *
+   * Обёртка setDrcUserPreference лежит на объекте страницы, и вызвать её
+   * может любой её скрипт. Отличить штатный переключатель YouTube от
+   * постороннего вызова по самому вызову нельзя: путь один и тот же, и
+   * ревизия безопасности отметила это как способ выдать себя за пользователя
+   * — расширение запоминало «человек хочет Stable Volume» и позже включало
+   * её тому, кто не просил.
+   *
+   * Отличается обстановка. Настоящий переключатель нажимают, и между
+   * нажатием и вызовом проходят миллисекунды; скрипт по таймеру такого следа
+   * не оставляет. Поэтому намерение принимается только внутри короткого окна
+   * после доверенного ввода: `isTrusted` страница подделать не может.
+   *
+   * Звук при этом ведёт себя одинаково в обоих случаях — предпочтение всё
+   * равно возвращается в 0. Под сомнением здесь только память о выборе
+   * пользователя, и в сомнительном случае она просто не меняется.
+   * ---------------------------------------------------------------------- */
+  const DRC_INTENT_WINDOW_MS = 2000;
+  let lastTrustedInputAt = 0;
+  for (const type of ['pointerdown', 'keydown']) {
+    on(
+      document,
+      type,
+      (e) => {
+        if (e.isTrusted) lastTrustedInputAt = Date.now();
+      },
+      true
+    );
+  }
+  const hasRecentTrustedInput = () =>
+    lastTrustedInputAt > 0 && Date.now() - lastTrustedInputAt <= DRC_INTENT_WINDOW_MS;
+
   /**
    * YouTube не публикует событие изменения Stable Volume. Штатный переключатель
    * вызывает метод активного плеера, поэтому на время нашей нормализации держим
@@ -894,7 +927,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       const requested = Number(value) === 1 ? 1 : 0;
       if (!SETTINGS.normalizeLoudness) return original.call(this, value, ...rest);
 
-      rememberYouTubeDrcUserIntent(requested === 1);
+      // Без свежего доверенного ввода это не выбор пользователя, а чужой
+      // вызов: предпочтение всё равно вернём в 0, но память о выборе
+      // не трогаем.
+      if (hasRecentTrustedInput()) rememberYouTubeDrcUserIntent(requested === 1);
       const result = original.call(this, 0, ...rest);
       youtubeNormalizationGeneration += 1;
       youtubeNormalizationPending = false;

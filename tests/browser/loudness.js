@@ -638,6 +638,64 @@ run('loudness: компенсация тихих роликов', async ({ brows
       JSON.stringify(restored)
     );
 
+    // Обёртка setDrcUserPreference лежит на объекте страницы, и позвать её
+    // может любой её скрипт. Ревизия безопасности отметила это как способ
+    // выдать себя за пользователя: расширение запоминало «человек хочет
+    // Stable Volume» и позже включало её тому, кто не просил. Проверяем на
+    // ролике, где Stable Volume у пользователя выключена — тогда флаг
+    // восстановления изначально пуст и любое его появление видно.
+    {
+      const quiet = await play(
+        {
+          id: 'forged-intent',
+          db: -6,
+          offersDrc: true,
+          drcState: 1,
+          preference: 0,
+        },
+        // Сохранённое состояние передаём явно: без него срабатывает миграция
+        // с 1.31.0 («нормализация включена — значит DRC выключили мы»), и
+        // флаг восстановления поднимается сам, ещё до всяких вызовов.
+        { state: { restoreYoutubeDrc: false } }
+      );
+      await quiet.waitForTimeout(1200);
+      await quiet.waitForTimeout(2200); // окно доверия закрылось
+      const forged = await quiet.evaluate(() => {
+        document.getElementById('movie_player').setDrcUserPreference(1);
+        return {
+          preference: window.__pref,
+          report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
+        };
+      });
+      check(
+        'чужой вызов не выдаёт себя за выбор пользователя',
+        forged.report.youtubeDrcRestoreNeeded === false,
+        JSON.stringify(forged.report.youtubeDrcRestoreNeeded)
+      );
+      check(
+        '  но предпочтение YouTube всё равно возвращается в 0',
+        forged.preference === 0,
+        JSON.stringify(forged.preference)
+      );
+
+      // То же самое сразу после настоящего нажатия — так это и выглядит,
+      // когда человек щёлкает переключатель в меню YouTube.
+      await quiet.mouse.click(2, 2);
+      const genuine = await quiet.evaluate(() => {
+        document.getElementById('movie_player').setDrcUserPreference(1);
+        return {
+          preference: window.__pref,
+          report: window[Symbol.for('ytev.main.instance.v2')].loudness(),
+        };
+      });
+      await quiet.close();
+      check(
+        'после доверенного нажатия тот же вызов запоминается',
+        genuine.report.youtubeDrcRestoreNeeded === true && genuine.preference === 0,
+        JSON.stringify(genuine)
+      );
+    }
+
     const nativePage = await play(
       {
         id: 'native-preference',
