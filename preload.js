@@ -199,6 +199,8 @@
       document.querySelector('video')
     );
   };
+  const isPreviewMedia = (media) =>
+    !!closest(media, 'ytd-video-preview, #inline-preview-player, #inline-player');
   const mediaSource = (media) =>
     media ? String(media.currentSrc || media.src || '') : '';
 
@@ -346,7 +348,8 @@
   function refreshEarlyLoudness(media) {
     if (!normalizeLoudness || !(media instanceof HTMLMediaElement)) return;
     const selectedMedia = activeVideo();
-    if (selectedMedia && media !== selectedMedia) return;
+    const preview = isPreviewMedia(media);
+    if (selectedMedia && media !== selectedMedia && !preview) return;
     const player = playerForMedia(media);
     if (!player || typeof player.getPlayerResponse !== 'function') return;
     try {
@@ -360,7 +363,7 @@
           : '';
       if (
         !videoId ||
-        (expectedId && videoId !== expectedId) ||
+        (!preview && expectedId && videoId !== expectedId) ||
         (snapshotId && snapshotId !== videoId)
       ) {
         return;
@@ -562,11 +565,19 @@
   window.addEventListener('keydown', onKeyDown, true);
   window.addEventListener('input', onNativeInput, true);
 
+  const EARLY_MEDIA_EVENTS = [
+    'loadstart',
+    'loadedmetadata',
+    'loadeddata',
+    'canplay',
+    'play',
+    'playing',
+  ];
   const onMediaReady = (event) => {
     refreshEarlyLoudness(event.target);
     applyCachedOutput(event.target);
   };
-  for (const type of ['loadstart', 'loadedmetadata', 'play']) {
+  for (const type of EARLY_MEDIA_EVENTS) {
     document.addEventListener(type, onMediaReady, true);
   }
 
@@ -608,7 +619,7 @@
     active = false;
     clearTimeout(releaseTimer);
     observer.disconnect();
-    for (const type of ['loadstart', 'loadedmetadata', 'play']) {
+    for (const type of EARLY_MEDIA_EVENTS) {
       document.removeEventListener(type, onMediaReady, true);
     }
     window.removeEventListener('pointerdown', onPointerDown, true);

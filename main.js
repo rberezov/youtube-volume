@@ -706,22 +706,100 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
    * Только применяем. Обратно в хранилище с предпросмотра не пишем ничего:
    * это не осознанный выбор уровня, а побочный эффект наведения.
    * ------------------------------------------------------------------ */
-  function applyPreviewVolume(el) {
+  const PREVIEW_MEDIA_SELECTOR =
+    'ytd-video-preview video, #inline-preview-player video, #inline-player video';
+  const previewLoudnessState = new WeakMap();
+
+  const previewPlayerFor = (el) => {
+    if (!(el instanceof HTMLMediaElement)) return null;
+    if (!el.closest('ytd-video-preview, #inline-preview-player, #inline-player')) {
+      return null;
+    }
+    return el.closest('.html5-video-player, #inline-preview-player, #inline-player');
+  };
+
+  function setPreviewLoudness(el, snap, boost) {
+    const previous = previewLoudnessState.get(el);
+    const next = Number.isFinite(boost) && boost > 0 ? boost : 1;
+    previewLoudnessState.set(el, {
+      id: snap && snap.id ? snap.id : '',
+      db: snap && Number.isFinite(snap.db) ? snap.db : null,
+      drc: !!(snap && snap.drc),
+      complete: !!(snap && snap.complete),
+      source: snap && snap.source ? snap.source : '',
+      trackId: snap && snap.trackId ? snap.trackId : '',
+      trackItag: snap && snap.trackItag != null ? snap.trackItag : null,
+      boost: next,
+    });
+    if (
+      (!previous || Math.abs(previous.boost - next) > 1e-6) &&
+      logicalVolume.has(el)
+    ) {
+      applyReal(el, toReal(logicalVolume.get(el)));
+    }
+  }
+
+  function resetPreviewLoudness(el) {
+    const previous = previewLoudnessState.get(el);
+    if (!previous || Math.abs(previous.boost - 1) > 1e-6) {
+      setPreviewLoudness(el, null, 1);
+    }
+  }
+
+  function refreshPreviewLoudness(el, eventType = '') {
+    const player = previewPlayerFor(el);
+    if (!player) return false;
+    // На emptied ответ плеера ещё относится к предыдущей карточке. Снимаем
+    // старое решение сразу, а новое читаем на следующем media-событии.
+    if (eventType === 'emptied') {
+      resetPreviewLoudness(el);
+      return false;
+    }
+    if (eventType === 'durationchange') resetPreviewLoudness(el);
+    const snap = readLoudness(player);
+    if (!snap.complete) return false;
+    setPreviewLoudness(el, snap, Math.pow(10, loudnessDbFor(snap) / 20));
+    return true;
+  }
+
+  function refreshAllPreviewLoudness() {
+    document.querySelectorAll(PREVIEW_MEDIA_SELECTOR).forEach((el) => {
+      refreshPreviewLoudness(el);
+      if (!el.muted && logicalVolume.has(el)) {
+        applyReal(el, toReal(logicalVolume.get(el)));
+      }
+    });
+  }
+
+  function applyPreviewVolume(el, eventType = '') {
     if (!volumeStateLoaded || !validVolume(preferredVolume)) return;
     if (!(el instanceof HTMLMediaElement)) return;
     // Главный плеер ведёт bindVideo() со всей своей логикой намерений.
     if (el === boundVideo || el === getVideo()) return;
+    refreshPreviewLoudness(el, eventType);
     if (el.muted) return; // немой предпросмотр не трогаем
     const current = Number(logicalOf(el));
     if (validVolume(current) && Math.abs(current - preferredVolume) <= VOLUME_EPSILON) {
+      // При снятии mute логический уровень уже может быть правильным, но
+      // индивидуальный коэффициент предпросмотра всё равно надо довести до
+      // GainNode (или до запасного прямого пути).
+      applyReal(el, toReal(preferredVolume));
       return; // уже наш уровень — молчим, иначе была бы перепалка записей
     }
     el.volume = preferredVolume;
   }
-  for (const type of ['playing', 'volumechange', 'loadeddata']) {
+  for (const type of [
+    'emptied',
+    'durationchange',
+    'loadedmetadata',
+    'loadeddata',
+    'canplay',
+    'playing',
+    'volumechange',
+  ]) {
     // Медиа-события не всплывают, но фазу перехвата проходят — поэтому один
     // слушатель на документе видит и те плееры, которых ещё нет в DOM.
-    on(document, type, (e) => applyPreviewVolume(e.target), true);
+    on(document, type, (e) => applyPreviewVolume(e.target, e.type), true);
   }
 
   function restorePreferredVolume(video) {
@@ -1599,7 +1677,12 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
 
   // Итоговое усиление в графе. Компенсация живёт только здесь: запасной
   // путь пишет прямо в video.volume, а он выше единицы не поднимается.
-  const outputGain = (el, real) => (el.muted ? 0 : real * loudnessBoost);
+  const loudnessBoostFor = (el) => {
+    const preview = previewLoudnessState.get(el);
+    if (preview) return preview.boost;
+    return el === boundVideo || el === getVideo() ? loudnessBoost : 1;
+  };
+  const outputGain = (el, real) => (el.muted ? 0 : real * loudnessBoostFor(el));
 
   /* ------------------------------------------------------------------ *
    * 1b. Регулировка через Web Audio — главное средство против треска
@@ -1783,7 +1866,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       if (nativeDesc.get.call(el) !== 1) nativeDesc.set.call(el, 1);
       return;
     }
-    setRealSmooth(el, real);
+    setRealSmooth(el, Math.min(1, outputGain(el, real)));
   }
 
   // Контекст можно запустить только после жеста пользователя, поэтому
@@ -1926,6 +2009,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // Пересчитываем после привязки синхронно: иначе первый ролик успевал
     // прозвучать с 0 дБ до отложенного media-события.
     refreshLoudness(); // сам позовёт reapplyCurve, если компенсация изменилась
+    refreshAllPreviewLoudness();
     reapplyCurve();
     ensureUI(); // включение/выключение своей шкалы должно срабатывать сразу
     layout();
@@ -1967,6 +2051,25 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     };
   }
 
+  function previewLoudnessReport() {
+    return [...document.querySelectorAll(PREVIEW_MEDIA_SELECTOR)].slice(0, 16).map((el) => {
+      const state = previewLoudnessState.get(el);
+      return {
+        id: state && state.id ? state.id : '',
+        db: state && Number.isFinite(state.db) ? state.db : null,
+        drc: !!(state && state.drc),
+        complete: !!(state && state.complete),
+        source: state && state.source ? state.source : '',
+        trackId: state && state.trackId ? state.trackId : '',
+        trackItag: state && state.trackItag != null ? state.trackItag : null,
+        boost: state ? state.boost : 1,
+        boostDb: Number((20 * Math.log10(state ? state.boost : 1)).toFixed(2)),
+        muted: el.muted,
+        paused: el.paused,
+      };
+    });
+  }
+
   // Этот объект никогда не публикуется в window. Секрет проверяет
   // неизменяемый preload-брокер, а сюда доходит уже авторизованный вызов.
   const controlApi = Object.freeze({
@@ -1986,6 +2089,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // диагностика, без update(), dispose() и чтения внутреннего DRC-флага.
     channel: CHANNEL_ID,
     loudness: loudnessReport,
+    previewLoudness: previewLoudnessReport,
   });
 
   /* ------------------------------------------------------------------ *
