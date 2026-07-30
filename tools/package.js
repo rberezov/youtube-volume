@@ -37,6 +37,16 @@ if (manifest.version !== pkg.version) {
   process.exit(1);
 }
 
+// В пакет уезжает собранный main.js. Если он разошёлся с частями в src/main,
+// то в магазин ушёл бы код, которого нет в исходнике, — отказываемся.
+const { build } = require('./build-main.js');
+if (fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8') !== build()) {
+  console.error(
+    'main.js разошёлся с src/main — выполните npm run build:main перед упаковкой'
+  );
+  process.exit(1);
+}
+
 const missing = INCLUDE.filter((entry) => !fs.existsSync(path.join(ROOT, entry)));
 if (missing.length) {
   console.error(`нет файлов: ${missing.join(', ')}`);
