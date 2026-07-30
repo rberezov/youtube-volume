@@ -375,12 +375,30 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   let mutedIntentUntil = 0;
   let volumeIntentVideo = null;
   let volumeIntentSource = '';
+  let volumeGestureAt = 0;
+  // Сколько времени после самого жеста запись громкости ещё считается его
+  // следствием.
+  //
+  // Полевая находка в Shorts: на первой загрузке меняешь громкость — и она
+  // сама уползает вниз. Причина в том, что окно намерения открывалось на
+  // секунды (нажатие на ползунок — на пять), а плеер именно в это время
+  // применяет СВОЙ сохранённый уровень. Служебная запись попадала в открытое
+  // окно и принималась за осознанный выбор: уровень оставался чужим, вместо
+  // того чтобы откатиться.
+  //
+  // Отличает их не величина, а близость к жесту. Свою громкость YouTube
+  // пишет синхронно в обработчике события — стрелка, колесо, штатный
+  // ползунок дают запись через миллисекунды. Отложенное восстановление
+  // приходит само по себе, вне всякого ввода. Полсекунды с запасом
+  // покрывают первое и отсекают второе.
+  const VOLUME_GESTURE_GRACE_MS = 500;
   const mediaSource = (video) =>
     video ? String(video.currentSrc || video.src || '') : '';
   const markVolumeIntent = (duration = 1200) => {
     volumeIntentVideo = getVideo();
     volumeIntentSource = mediaSource(volumeIntentVideo);
     volumeIntentUntil = Date.now() + duration;
+    volumeGestureAt = Date.now();
   };
   const markMutedIntent = (duration = 1200) => {
     mutedIntentUntil = Date.now() + duration;
@@ -395,9 +413,15 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     volumeIntentUntil = 0;
     volumeIntentVideo = null;
     volumeIntentSource = '';
+    volumeGestureAt = 0;
   };
   const hasVolumeIntent = (video = getVideo()) => {
     if (Date.now() > volumeIntentUntil) return false;
+    // Жест мог быть давно: нажатие открывает окно на пять секунд, чтобы
+    // пережить долгую протяжку штатного ползунка. Но принимать по нему
+    // чужую запись можно, только пока сам жест свежий — иначе в окно
+    // попадает отложенное восстановление громкости плеером.
+    if (Date.now() - volumeGestureAt > VOLUME_GESTURE_GRACE_MS) return false;
     if (volumeIntentVideo && video !== volumeIntentVideo) return false;
     const source = mediaSource(video);
     return !volumeIntentSource || !source || source === volumeIntentSource;
@@ -686,6 +710,30 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
         target &&
         (nativeVolumeControl(target) || target.closest('.ytev-slider'))
       ) {
+        markVolumeIntent(1500);
+        scheduleTrustedNativeVolume(target);
+      }
+    },
+    true
+  );
+
+  // Отпускание — тоже жест, и без него правило «запись близко к жесту» ломало
+  // бы протяжку с остановкой: нажал, подержал ползунок неподвижно секунду,
+  // отпустил — штатный плеер пишет громкость именно на отпускании, а
+  // последнее движение к тому времени уже не свежее.
+  on(
+    window,
+    'pointerup',
+    (e) => {
+      const target = e.target instanceof Element ? e.target : null;
+      if (!target) return;
+      // Кнопка звука исключается первой и по той же причине, что при
+      // нажатии: она лежит ВНУТРИ .ytp-volume-area. Без этой ветки
+      // отпускание заново открывало окно, закрытое нажатием, и ноль от
+      // mute() плеера снова становился «выбранной громкостью» — ровно то,
+      // что ловит mute-persist.
+      if (target.closest('.ytp-mute-button, .ytev-mute')) return;
+      if (nativeVolumeControl(target) || target.closest('.ytev-slider')) {
         markVolumeIntent(1500);
         scheduleTrustedNativeVolume(target);
       }
