@@ -19,6 +19,7 @@ const HARNESSES = [
   'popup-fit.js',
   'carryover.js',
   'mute-persist.js',
+  'service-write.js',
   'generation.js',
   'preload-silence.js',
   'loudness.js',
