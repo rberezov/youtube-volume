@@ -116,6 +116,9 @@ const referenced = [
   manifest.background.service_worker,
   manifest.action.default_popup,
   ...manifest.content_scripts.flatMap((entry) => entry.js),
+  // Ресурсы страницы: воркле́т грузится по chrome-extension://-адресу, и
+  // опечатка в имени тоже видна только на установленном расширении.
+  ...(manifest.web_accessible_resources || []).flatMap((entry) => entry.resources),
   ...Object.values(manifest.icons),
 ];
 for (const file of referenced) {

@@ -15,6 +15,9 @@ const mainFunction = function youtubeVolumeMain() {};
 const chromeMock = {
   runtime: {
     lastError: null,
+    getURL(file) {
+      return `chrome-extension://aaaabbbbccccddddeeeeffffgggghhhh/${file}`;
+    },
     onMessage: {
       addListener(listener) {
         onMessage = listener;
@@ -158,6 +161,13 @@ async function run() {
     'localized strings must travel in the injection payload'
   );
   assert.equal(injections[0].args[0].strings.playerSliderLabel, 'msg:playerSliderLabel');
+  // Адрес воркле́та может прийти только отсюда: в MAIN-мире chrome.runtime
+  // нет, а blob-модуль CSP youtube.com отклоняет.
+  assert.equal(
+    injections[0].args[0].meterUrl,
+    'chrome-extension://aaaabbbbccccddddeeeeffffgggghhhh/worklets/loudness-meter.js',
+    'boot payload must carry the loudness worklet URL'
+  );
   assert.equal(injections[0].args[1], secret);
 
   let updateResponse;

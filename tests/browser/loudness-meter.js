@@ -24,19 +24,10 @@ const { createReporter, loadPlaywright } = require('./harness');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 
-// Исходник воркле́та живёт в main.js между маркерами — единственный
-// экземпляр на расширение и тесты. Тот же приём, что и в
-// defaults-consistency: разбор исходника вместо копии.
+// Проверяется ровно тот файл, который расширение и грузит: отдельный
+// worklets/loudness-meter.js, а не копия.
 function meterSource() {
-  const source = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8');
-  const start = source.indexOf('/* ytev:loudness-worklet:start */');
-  const end = source.indexOf('/* ytev:loudness-worklet:end */');
-  if (start < 0 || end < 0) throw new Error('в main.js не найдены маркеры воркле́та');
-  const block = source.slice(start, end);
-  const open = block.indexOf('`');
-  const close = block.lastIndexOf('`');
-  if (open < 0 || close <= open) throw new Error('не найдено тело воркле́та');
-  return block.slice(open + 1, close);
+  return fs.readFileSync(path.join(ROOT, 'worklets', 'loudness-meter.js'), 'utf8');
 }
 
 // Отклик K-взвешивания на частоте f. Считается здесь независимо: сначала

@@ -115,7 +115,18 @@ async function initialize(sender, channel, secret) {
     target: targetFrom(sender),
     world: 'MAIN',
     func: youtubeVolumeMain,
-    args: [{ channel, settings, state, strings: uiStrings() }, secret],
+    // Адрес воркле́та-измерителя знает только расширение: в MAIN-мире
+    // chrome.runtime нет, а blob-модуль CSP youtube.com не пропускает.
+    args: [
+      {
+        channel,
+        settings,
+        state,
+        strings: uiStrings(),
+        meterUrl: chrome.runtime.getURL('worklets/loudness-meter.js'),
+      },
+      secret,
+    ],
   });
   return results.some((result) => result && result.result === true);
 }
