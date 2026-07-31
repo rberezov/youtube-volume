@@ -37,6 +37,7 @@
     }
     applySettings(payload.settings);
     applyStrings(payload.strings);
+    applyMeterUrl(payload.meterUrl);
     if (!volumeStateLoaded) {
       const savedValue = state.savedVolume;
       const savedVolume = Number(savedValue);
@@ -68,6 +69,7 @@
     // Пересчитываем после привязки синхронно: иначе первый ролик успевал
     // прозвучать с 0 дБ до отложенного media-события.
     refreshLoudness(); // сам позовёт reapplyCurve, если компенсация изменилась
+    syncMeter(); // настройку выравнивания можно включить и во время ролика
     refreshAllPreviewLoudness();
     reapplyCurve();
     ensureUI(); // включение/выключение своей шкалы должно срабатывать сразу
@@ -107,6 +109,10 @@
       boost: loudnessBoost,
       boostDb: Number((20 * Math.log10(loudnessBoost)).toFixed(2)),
       maxBoostDb: SETTINGS.maxBoostDb,
+      // Живой замер по BS.1770. Приходит от воркле́та раз в секунду; null —
+      // измеритель не подключён (выравнивание выключено, нет Web Audio или
+      // страница не дала загрузить модуль).
+      live: meterSnapshot,
     };
   }
 

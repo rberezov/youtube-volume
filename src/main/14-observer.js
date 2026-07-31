@@ -122,6 +122,7 @@
     clearTimeout(earlyHideSafetyTimer);
     clearTimeout(mediaLoudnessRefreshTimer);
     releaseYouTubeDrcSetterGuard();
+    detachMeter();
     for (const off of teardown.splice(0)) {
       try {
         off();
