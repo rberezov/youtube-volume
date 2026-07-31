@@ -23,6 +23,7 @@ const INCLUDE = [
   'popup.html',
   'popup.css',
   'popup.js',
+  'worklets',
   '_locales',
   'icons',
 ];

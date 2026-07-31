@@ -26,6 +26,7 @@
     // появится, как только снимок станет согласованным.
     resetLoudness();
     queueMediaLoudnessRefresh(true);
+    syncMeter(); // измеритель переезжает на новый элемент вместе с привязкой
     const current = Number(logicalOf(video));
     if (!validVolume(preferredVolume) && validVolume(current)) {
       rememberVolume(current);

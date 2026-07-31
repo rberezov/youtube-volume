@@ -1763,6 +1763,122 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
    *    граф ничего не идёт, возвращаемся к прямой записи громкости.
    * ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------ *
+   * 1b-bis. Измеритель громкости (пока только диагностика)
+   *
+   * Нормализация по loudnessDb статическая: одно число на весь ролик. Что
+   * происходит ВНУТРИ ролика — лекция с тихой речью и громкой заставкой, —
+   * не знает ни она, ни ответ плеера. Прежде чем это чинить, нужно уметь
+   * мерить, поэтому здесь пока только измеритель: звук он не трогает и
+   * подключается узлом без выхода (проверено: без выхода узел всё равно
+   * считает, зато физически не может попасть в звуковой путь).
+   *
+   * Считает по ITU-R BS.1770-4 — тому же стандарту, по которому меряет сам
+   * YouTube: K-взвешивание, блоки 400мс с перекрытием 75%, гейтирование,
+   * плюс диапазон громкости (LRA) по EBU Tech 3342. Коэффициенты выводятся
+   * под фактическую частоту дискретизации, а не берутся готовыми для 48кГц.
+   *
+   * Снимок приходит раз в секунду от самого воркле́та, по аудиочасам:
+   * периодических опросов в main.js нет и здесь они не появляются.
+   * ------------------------------------------------------------------ */
+
+  // Исходник измерителя лежит отдельным файлом расширения —
+  // worklets/loudness-meter.js. Раньше он ехал сюда строкой и грузился как
+  // blob:, но на самом youtube.com так нельзя: CSP страницы отклоняет
+  // blob-модуль («Unable to load a worklet's module»), и измеритель молча не
+  // подключался. Адрес chrome-extension:// приходит в доверенной посылке от
+  // service worker, и под CSP страницы он не подпадает — проверено на строгом
+  // script-src 'self' в tests/browser/meter-attach.js.
+  let meterUrl = '';
+
+  // Адрес принимается только из доверенной посылки и только на наш файл:
+  // произвольный URL здесь означал бы чужой код внутри нашего воркле́та.
+  function applyMeterUrl(url) {
+    if (meterUrl || typeof url !== 'string') return;
+    if (!/^chrome-extension:\/\/[a-z0-9-]+\/worklets\/loudness-meter\.js$/i.test(url)) {
+      return;
+    }
+    meterUrl = url;
+  }
+
+  let meterModulePromise = null;
+  let meterNode = null;
+  let meterElement = null;
+  let meterSnapshot = null;
+
+  function meterModuleReady(ctx) {
+    if (meterModulePromise) return meterModulePromise;
+    // Без адреса промис не кешируем: посылка с ним могла просто не доехать,
+    // и следующая попытка должна быть настоящей, а не отказом из памяти.
+    if (!meterUrl) return Promise.resolve(false);
+    try {
+      meterModulePromise = ctx.audioWorklet
+        .addModule(meterUrl)
+        .then(() => true)
+        .catch(() => false);
+    } catch {
+      meterModulePromise = Promise.resolve(false);
+    }
+    return meterModulePromise;
+  }
+
+  function detachMeter() {
+    meterSnapshot = null;
+    meterElement = null;
+    if (!meterNode) return;
+    try {
+      meterNode.port.onmessage = null;
+      meterNode.disconnect();
+    } catch {}
+    meterNode = null;
+  }
+
+  /**
+   * Отвод берётся от `src`, до нашего усилителя: мерить нужно сам материал,
+   * а не результат собственной регулировки.
+   */
+  function attachMeter(el, node) {
+    if (!SETTINGS.normalizeLoudness || !node || node.released) return;
+    if (meterElement === el && meterNode) return;
+    const ctx = audio.ctx;
+    if (!ctx || !ctx.audioWorklet || typeof AudioWorkletNode !== 'function') return;
+    meterModuleReady(ctx).then((ready) => {
+      if (!ready || node.released || !SETTINGS.normalizeLoudness) return;
+      if (el !== boundVideo && el !== getVideo()) return;
+      if (meterElement === el && meterNode) return;
+      try {
+        const meter = new AudioWorkletNode(ctx, 'ytev-loudness-meter', {
+          numberOfInputs: 1,
+          numberOfOutputs: 0,
+        });
+        node.src.connect(meter);
+        detachMeter();
+        meter.port.onmessage = (event) => {
+          if (meterNode === meter) meterSnapshot = event.data;
+        };
+        meterNode = meter;
+        meterElement = el;
+      } catch {}
+    });
+  }
+
+  // Настройку выравнивания можно включить и во время ролика.
+  //
+  // Зовётся ещё и при смене ролика: подключение происходит в момент создания
+  // звукового графа, и если тогда шёл другой элемент (лента, Shorts), второй
+  // попытки без этого не было бы никогда. Заодно снимаем измеритель с ушедшего
+  // элемента, чтобы числа не смешивались между роликами.
+  function syncMeter() {
+    if (!SETTINGS.normalizeLoudness) {
+      detachMeter();
+      return;
+    }
+    const video = getVideo();
+    if (meterElement && meterElement !== video) detachMeter();
+    const node = video ? audio.nodes.get(video) : null;
+    if (node) attachMeter(video, node);
+  }
+
   const audio = {
     ctx: null,
     unavailable: false,
@@ -1824,6 +1940,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       node.onVolumeChange = () => applyReal(el, toReal(logicalOf(el)));
       audio.nodes.set(el, node);
       audio.liveNodes.set(el, node);
+      attachMeter(el, node);
       // уровень задаёт gain, сам элемент держим на максимуме
       nativeDesc.set.call(el, 1);
       el.addEventListener('volumechange', node.onVolumeChange);
@@ -1893,6 +2010,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
   function fallbackToDirect(el, node) {
     if (!node || node.released) return;
     node.released = true;
+    if (meterElement === el) detachMeter();
     audio.failedElements.add(el);
     audio.nodes.delete(el);
     audio.liveNodes.delete(el);
@@ -2036,6 +2154,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     }
     applySettings(payload.settings);
     applyStrings(payload.strings);
+    applyMeterUrl(payload.meterUrl);
     if (!volumeStateLoaded) {
       const savedValue = state.savedVolume;
       const savedVolume = Number(savedValue);
@@ -2067,6 +2186,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // Пересчитываем после привязки синхронно: иначе первый ролик успевал
     // прозвучать с 0 дБ до отложенного media-события.
     refreshLoudness(); // сам позовёт reapplyCurve, если компенсация изменилась
+    syncMeter(); // настройку выравнивания можно включить и во время ролика
     refreshAllPreviewLoudness();
     reapplyCurve();
     ensureUI(); // включение/выключение своей шкалы должно срабатывать сразу
@@ -2106,6 +2226,10 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
       boost: loudnessBoost,
       boostDb: Number((20 * Math.log10(loudnessBoost)).toFixed(2)),
       maxBoostDb: SETTINGS.maxBoostDb,
+      // Живой замер по BS.1770. Приходит от воркле́та раз в секунду; null —
+      // измеритель не подключён (выравнивание выключено, нет Web Audio или
+      // страница не дала загрузить модуль).
+      live: meterSnapshot,
     };
   }
 
@@ -3201,6 +3325,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     // появится, как только снимок станет согласованным.
     resetLoudness();
     queueMediaLoudnessRefresh(true);
+    syncMeter(); // измеритель переезжает на новый элемент вместе с привязкой
     const current = Number(logicalOf(video));
     if (!validVolume(preferredVolume) && validVolume(current)) {
       rememberVolume(current);
@@ -4085,6 +4210,7 @@ function youtubeVolumeMain(initialPayload, updateSecret) {
     clearTimeout(earlyHideSafetyTimer);
     clearTimeout(mediaLoudnessRefreshTimer);
     releaseYouTubeDrcSetterGuard();
+    detachMeter();
     for (const off of teardown.splice(0)) {
       try {
         off();
